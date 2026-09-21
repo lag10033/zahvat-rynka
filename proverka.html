@@ -1,0 +1,93 @@
+<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Захват рынка — проверка устройства</title>
+<style>
+:root{color-scheme:dark}body{margin:0;padding:14px;background:#12161d;color:#e8edf5;font:16px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+h1{font-size:20px;margin:0 0 6px}p.sub{color:#9aa7b8;margin:0 0 14px;font-size:14px}
+#bar{height:8px;background:#232b36;border-radius:6px;overflow:hidden;margin:10px 0}#fill{height:100%;width:0;background:#f5b93a;transition:width .3s}
+#step{color:#9aa7b8;font-size:14px;min-height:22px}
+table{border-collapse:collapse;width:100%;margin:10px 0;font-size:15px}td{padding:7px 4px;border-bottom:1px solid #232b36;vertical-align:top}
+td:first-child{color:#9aa7b8;width:52%}b.ok{color:#5ad18a}b.bad{color:#ff8080}
+button{font:600 16px -apple-system,sans-serif;padding:13px 16px;border-radius:12px;border:0;background:#f5b93a;color:#12161d;width:100%;margin-top:10px}
+button.sec{background:#232b36;color:#e8edf5}
+iframe{border:0;width:100%;height:60vh;margin-top:10px;border-radius:10px;background:#0c0f14}
+#out{white-space:pre-wrap;font:12px ui-monospace,Menlo,monospace;background:#0c0f14;padding:10px;border-radius:10px;margin-top:10px;max-height:40vh;overflow:auto}
+</style>
+<h1>Проверка устройства</h1>
+<p class="sub">Игра сама сыграет партию на 30 лет и замерит скорость. Ваша сохранённая партия не пострадает. Не выключайте экран — около минуты.</p>
+<div id="bar"><div id="fill"></div></div><div id="step">запуск…</div>
+<div id="res"></div>
+<iframe id="fr" src="index.html" title="игра"></iframe>
+<script>
+const R = {}, fr = document.getElementById('fr'), stepEl = document.getElementById('step'), fill = document.getElementById('fill');
+const w = ms => new Promise(r => setTimeout(r, ms));
+let done = 0; const TOTAL = 9;
+function step(t) { done++; fill.style.width = Math.round(done / TOTAL * 100) + '%'; stepEl.textContent = t; }
+const KEY = 'zahvat-rynka-v1';
+async function run() {
+  R['Устройство'] = navigator.userAgent.replace('Mozilla/5.0 ', '');
+  R['Экран, точек'] = innerWidth + ' × ' + innerHeight + ' (плотность ' + (devicePixelRatio || 1) + ')';
+  R['Запущено с иконки'] = (matchMedia('(display-mode: standalone)').matches || navigator.standalone) ? 'да' : 'нет, из браузера';
+  R['Кнопка «Поделиться»'] = typeof navigator.share === 'function' ? 'работает' : 'НЕТ — сохраняйте отчёт копированием';
+  R['Офлайн-режим'] = (await navigator.serviceWorker.getRegistration()) ? 'установлен' : 'не установлен';
+  step('проверяю память браузера…');
+  let backup = null; try { backup = localStorage.getItem(KEY); } catch (e) {}
+  let free = 0; try { for (let mb = 1; mb <= 8; mb++) { try { localStorage.setItem('__probe__', 'x'.repeat(mb * 1048576)); free = mb; } catch (e) { break; } } } finally { try { localStorage.removeItem('__probe__'); } catch (e) {} }
+  R['Свободно для партий'] = free >= 3 ? free + ' МБ — <b class="ok">хватит с запасом</b>' : free + ' МБ — <b class="bad">мало</b>';
+  step('открываю игру…');
+  let n = 0; const W = fr.contentWindow; while (!(W.App && W.Engine && W.Coach) && n < 150) { await w(100); n++; }
+  if (!W.App) { R['Ошибка'] = 'игра не открылась'; return show(); }
+  const E = W.Engine, D = fr.contentDocument;
+  const savedReal = W.App.save; W.App.save = function () {};           // сохранённую партию не трогаем
+  step('играю 30 лет, это дольше всего…');
+  const seed = 4242, teams = [{ name: 'Я', kind: 'human' }].concat(E.generateTable({ seed, strength: 'normal', rivals: 3 }));
+  W.App.state = E.createGame({ name: 'проверка', createdAt: new Date().toISOString(), seed, years: 30, teams });
+  W.App.view = { screen: 'board' }; W.App.go('board');
+  const t0 = performance.now(); let mx = 0, k = 0;
+  while (!W.App.state.finished && k < 130) { k++;
+    const st = W.App.state, me = st.teams[0];
+    if (me.status === 'active') { const t2 = Object.assign(E.clone(me), { ai: E.clone(st.teams[1].ai), kind: 'bot' }); const d = E.smartDecide(st, t2); delete d._bot; d.research = st.quarter % 4 === 1; E.setDecision(st, 1, d); }
+    const nb = D.querySelector('#app [data-action="board"]'); if (nb) nb.click();
+    const cb = D.querySelector('#app [data-action="close"]'); if (!cb) break;
+    const t1 = performance.now(); cb.click(); mx = Math.max(mx, performance.now() - t1);
+    if (k % 8 === 0) { stepEl.textContent = 'играю: год ' + Math.ceil(k / 4) + ' из 30…'; await w(0); } }
+  const st = W.App.state;
+  R['Партия на 30 лет'] = st.market.history.length + ' кварталов за ' + ((performance.now() - t0) / 1000).toFixed(1) + ' с';
+  R['Закрытие квартала'] = Math.round(mx) + ' мс (дольше всего)';
+  step('проверяю сохранение…');
+  const raw = JSON.stringify({ state: st, v: 1 });
+  R['Размер партии'] = (raw.length / 1000).toFixed(0) + ' тыс. знаков';
+  try { localStorage.setItem('__save_test__', raw); localStorage.removeItem('__save_test__'); R['Сохранение партии'] = '<b class="ok">проходит</b>'; }
+  catch (e) { R['Сохранение партии'] = '<b class="bad">НЕ ПРОХОДИТ (' + e.name + ')</b>'; }
+  step('открываю журнал разведки…');
+  W.App.go('final'); await w(80);
+  const de = D.documentElement; R['Прокрутка вбок на финале'] = de.scrollWidth > de.clientWidth + 1 ? '<b class="bad">есть</b>' : '<b class="ok">нет</b>';
+  const jb = D.querySelector('#app [data-action="journal"]'); if (jb) { const t2 = performance.now(); jb.click(); await w(80);
+    let slow = 0, wide = false; const tabs = D.querySelectorAll('.modal [data-action="jTab"]').length;
+    for (let i = 0; i < tabs; i++) { const b = D.querySelectorAll('.modal [data-action="jTab"]')[i]; const t3 = performance.now(); b.click(); await w(40); slow = Math.max(slow, performance.now() - t3); const M = D.querySelector('.modal'); if (M.scrollWidth > M.clientWidth + 1) wide = true; }
+    R['Журнал разведки'] = Math.round(performance.now() - t2) + ' мс, вкладка до ' + Math.round(slow) + ' мс' + (wide ? ' — <b class="bad">прокрутка вбок</b>' : '');
+    const cl = D.querySelector('.modal [data-action="closeModal"]'); if (cl) cl.click(); }
+  step('считаю разбор партии…');
+  const db = D.querySelector('#app [data-action="debrief"]');
+  if (db) { const t4 = performance.now(); db.click(); let m = 0; while (!/принесли успех|Не удалось/.test(D.querySelector('#app').innerText) && m < 900) { await w(100); m++; }
+    const sec = (performance.now() - t4) / 1000; R['Разбор партии'] = sec.toFixed(1) + ' с' + (sec > 20 ? ' — <b class="bad">долго</b>' : ''); W.App.go('final'); await w(60); }
+  step('собираю отчёт для разбора…');
+  const t5 = performance.now(); let txt = ''; try { txt = W.Coach.exportText(W.App.state); } catch (e) { R['Отчёт'] = 'ошибка: ' + e; }
+  if (txt) { const sec = (performance.now() - t5) / 1000; R['Отчёт для разбора'] = sec.toFixed(1) + ' с, ' + Math.round(txt.length / 1000) + ' тыс. знаков' + (sec > 20 ? ' — <b class="bad">долго</b>' : ''); }
+  step('готово');
+  W.App.save = savedReal;
+  try { if (backup !== null) localStorage.setItem(KEY, backup); } catch (e) {}
+  R['Ваша партия'] = backup ? 'на месте, не тронута' : 'сохранённой партии не было';
+  show();
+}
+function show() {
+  fr.remove(); document.getElementById('bar').remove(); stepEl.textContent = '';
+  const rows = Object.keys(R).map(k => '<tr><td>' + k + '</td><td>' + R[k] + '</td></tr>').join('');
+  const plain = Object.keys(R).map(k => k + ': ' + String(R[k]).replace(/<[^>]+>/g, '')).join('\n');
+  document.getElementById('res').innerHTML = '<table>' + rows + '</table>' +
+    '<button id="copy">Скопировать результат</button>' + (typeof navigator.share === 'function' ? '<button class="sec" id="share">Поделиться</button>' : '') +
+    '<div id="out">' + plain.replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c])) + '</div>';
+  document.getElementById('copy').onclick = () => { navigator.clipboard.writeText(plain).then(() => document.getElementById('copy').textContent = 'Скопировано — вставьте в чат'); };
+  const sh = document.getElementById('share'); if (sh) sh.onclick = () => navigator.share({ title: 'Проверка устройства', text: plain });
+}
+run().catch(e => { R['Сбой'] = String(e); show(); });
+</script></html>
