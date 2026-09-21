@@ -21,9 +21,11 @@ iframe{border:0;width:100%;height:60vh;margin-top:10px;border-radius:10px;backgr
 const R = {}, fr = document.getElementById('fr'), stepEl = document.getElementById('step'), fill = document.getElementById('fill');
 const w = ms => new Promise(r => setTimeout(r, ms));
 let done = 0; const TOTAL = 9;
-function step(t) { done++; fill.style.width = Math.round(done / TOTAL * 100) + '%'; stepEl.textContent = t; }
+function step(t) { done++; fill.style.width = Math.round(done / TOTAL * 100) + '%'; stepEl.textContent = t; draw(); }
+function draw() { document.getElementById('res').innerHTML = '<table>' + Object.keys(R).map(k => '<tr><td>' + k + '</td><td>' + R[k] + '</td></tr>').join('') + '</table>'; }
 const KEY = 'zahvat-rynka-v1';
 async function run() {
+  try { if (navigator.wakeLock) window.__wl = await navigator.wakeLock.request('screen'); } catch (e) {}
   R['Устройство'] = navigator.userAgent.replace('Mozilla/5.0 ', '');
   R['Экран, точек'] = innerWidth + ' × ' + innerHeight + ' (плотность ' + (devicePixelRatio || 1) + ')';
   R['Запущено с иконки'] = (matchMedia('(display-mode: standalone)').matches || navigator.standalone) ? 'да' : 'нет, из браузера';
@@ -68,8 +70,11 @@ async function run() {
     const cl = D.querySelector('.modal [data-action="closeModal"]'); if (cl) cl.click(); }
   step('считаю разбор партии…');
   const db = D.querySelector('#app [data-action="debrief"]');
-  if (db) { const t4 = performance.now(); db.click(); let m = 0; while (!/принесли успех|Не удалось/.test(D.querySelector('#app').innerText) && m < 900) { await w(100); m++; }
-    const sec = (performance.now() - t4) / 1000; R['Разбор партии'] = sec.toFixed(1) + ' с' + (sec > 20 ? ' — <b class="bad">долго</b>' : ''); W.App.go('final'); await w(60); }
+  if (db) { const t4 = performance.now(); db.click(); let m = 0, ok = false;
+    while (m < 3000) { if (/принесли успех|Не удалось/.test(D.querySelector('#app').innerText)) { ok = true; break; } await w(100); m++; if (m % 20 === 0) stepEl.textContent = 'считаю разбор партии… ' + Math.round(m / 10) + ' с'; }
+    const sec = (performance.now() - t4) / 1000;
+    R['Разбор партии'] = ok ? sec.toFixed(1) + ' с' + (sec > 25 ? ' — <b class="bad">долго</b>' : '') : '<b class="bad">не досчитался за 5 минут</b>';
+    W.App.go('final'); await w(60); }
   step('собираю отчёт для разбора…');
   const t5 = performance.now(); let txt = ''; try { txt = W.Coach.exportText(W.App.state); } catch (e) { R['Отчёт'] = 'ошибка: ' + e; }
   if (txt) { const sec = (performance.now() - t5) / 1000; R['Отчёт для разбора'] = sec.toFixed(1) + ' с, ' + Math.round(txt.length / 1000) + ' тыс. знаков' + (sec > 20 ? ' — <b class="bad">долго</b>' : ''); }
@@ -80,12 +85,13 @@ async function run() {
   show();
 }
 function show() {
-  fr.remove(); document.getElementById('bar').remove(); stepEl.textContent = '';
+  try { if (window.__wl) window.__wl.release(); } catch (e) {}
+  if (fr.parentNode) fr.remove(); document.getElementById('bar').remove(); stepEl.textContent = '';
   const rows = Object.keys(R).map(k => '<tr><td>' + k + '</td><td>' + R[k] + '</td></tr>').join('');
   const plain = Object.keys(R).map(k => k + ': ' + String(R[k]).replace(/<[^>]+>/g, '')).join('\n');
   document.getElementById('res').innerHTML = '<table>' + rows + '</table>' +
     '<button id="copy">Скопировать результат</button>' + (typeof navigator.share === 'function' ? '<button class="sec" id="share">Поделиться</button>' : '') +
-    '<div id="out">' + plain.replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c])) + '</div>';
+    '<p style="color:#9aa7b8;font-size:13px;margin-top:12px">Если что-то считалось слишком долго или страница перезагрузилась — пришлите скриншот того, что видно, этого хватит.</p><div id="out">' + plain.replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c])) + '</div>';
   document.getElementById('copy').onclick = () => { navigator.clipboard.writeText(plain).then(() => document.getElementById('copy').textContent = 'Скопировано — вставьте в чат'); };
   const sh = document.getElementById('share'); if (sh) sh.onclick = () => navigator.share({ title: 'Проверка устройства', text: plain });
 }
