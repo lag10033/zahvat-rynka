@@ -229,7 +229,7 @@ const DEFAULT_CONSTS = {
   // сложный режим
   dossierCost:40000, eventDemandClamp:[0.4, 2.0], rateMin:0.03, rateMax:0.07,
   // охота (сложный режим): цена владельцев = осязаемая стоимость × коэффициент состояния × упрямство
-  offerFee:30000, askCoef:{ healthy:1.6, pressure:1.25, trouble:0.9, edge:0.7 }, askMin:100000, askStubborn:0.10, leaderAskCoef:3, askFarRatio:0.7, distressDebtRatio:0.8, forSaleStreak:3, lotMinRatio:0.5,
+  offerFee:30000, askCoef:{ healthy:1.6, pressure:1.25, trouble:0.9, edge:0.7 }, askMin:100000, askStubborn:0.10, leaderAskCoef:3, entrantDelay:6, entrantShare:0.5, askFarRatio:0.7, distressDebtRatio:0.8, forSaleStreak:3, lotMinRatio:0.5,
 };
 
 const BOT_PROFILES = {
@@ -364,6 +364,59 @@ function buildRandomScenario(years, c, seed) {
   const newsErr = new Array(Q).fill(0); idx.slice(0, nErr).forEach(i => { newsErr[i] = rnd() < 0.5 ? 1 : 2; });
   return { random: true, quarters: Q, shape, level, phases, events, rates, newsErr, crisisStarts: crisisStarts.map(x => x + 1), noCrisis };
 }
+// ---------- длинная партия (больше 5 лет): деловые циклы ----------
+// Партии до 5 лет строятся прежними функциями и не меняются. В длинной партии рынок идёт циклами: кризис → восстановление → 2,5–4,5 года роста,
+// иногда «золотой год». Общий рост — около 1 % в квартал вне кризисов. Товары первые пять лет растут как в короткой партии,
+// дальше дрейфуют медленно и в обе стороны. События — 1–3 на каждые пять лет.
+function buildLongScenario(years, c, seed, products) {
+  const rnd = mulberry32((seed ^ 0x27d4eb2f) >>> 0), Q = years * 4;
+  const r = (a, b) => a + (b - a) * rnd(), ri = (a, b) => Math.floor(r(a, b + 1)), pick = (arr) => arr[Math.floor(rnd() * arr.length)];
+  const segs = [], crisisStarts = [];
+  let pos = ri(2, 13);
+  while (pos < Q - 3) {
+    const kind = pick(['sharp', 'classic', 'classic', 'long', 'double']); let end;
+    if (kind === 'double') { const l1 = ri(2, 3); segs.push({ type: 'crisis', start: pos, len: l1, depth: r(0.30, 0.38) }); segs.push({ type: 'recovery', start: pos + l1, len: 2, to: r(0.86, 0.93) }); segs.push({ type: 'crisis', start: pos + l1 + 2, len: 2, depth: r(0.25, 0.32) }); end = pos + l1 + 4; }
+    else { const len = kind === 'sharp' ? 2 : kind === 'classic' ? 4 : ri(5, 6); segs.push({ type: 'crisis', start: pos, len, depth: kind === 'sharp' ? r(0.38, 0.45) : kind === 'classic' ? r(0.34, 0.40) : r(0.24, 0.30) }); end = pos + len; }
+    crisisStarts.push(pos);
+    const recLen = ri(2, 4); segs.push({ type: 'recovery', start: end, len: recLen, to: r(0.97, 1.04) });
+    const free = end + recLen, calm = ri(10, 18);
+    if (rnd() < 0.5) { const bl = ri(3, 4); segs.push({ type: 'boom', start: free + ri(2, calm - bl - 2), len: bl, g: r(0.025, 0.04) }); }
+    pos = free + calm;
+  }
+  const shape = new Array(Q).fill(1), level = new Array(Q).fill(1), phases = new Array(Q).fill('growth');
+  const segAt = (i) => segs.find(sg => i >= sg.start && i < sg.start + sg.len);
+  let lvl = 1, lastShape = 1;
+  for (let i = 0; i < Q; i++) {
+    const sg = segAt(i);
+    if (!sg || sg.type === 'boom') { if (lastShape !== 1) { lvl *= lastShape; lastShape = 1; } if (i > 0) lvl *= 1 + (sg ? sg.g : r(0.002, 0.010)); shape[i] = 1; level[i] = lvl; phases[i] = sg ? 'boom' : 'growth'; }
+    else if (sg.type === 'crisis') { const j = i - sg.start, f = []; for (let k = 0; k < sg.len; k++) f.push(0.45 + 0.55 * Math.sin(Math.PI * (k + 0.5) / sg.len)); const fm = Math.max.apply(null, f);
+      const base = Math.min(1, sg.start > 0 && phases[sg.start - 1] === 'recovery' ? shape[sg.start - 1] : 1);
+      shape[i] = base * (1 - sg.depth * f[j] / fm); level[i] = lvl; phases[i] = 'crisis'; lastShape = shape[i]; }
+    else { const j = i - sg.start, from = sg.start > 0 ? shape[sg.start - 1] : 1, t = (j + 1) / sg.len; shape[i] = from + (sg.to - from) * t; level[i] = lvl; phases[i] = 'recovery'; lastShape = shape[i]; }
+  }
+  // тренд товаров: пять лет — как в короткой партии, дальше каждые пять лет новый медленный дрейф
+  const trend = products.map(p => { const out = []; let v = 1, g = p.growth; for (let i = 0; i < Q; i++) { if (i > 0) { if (i >= 20 && i % 20 === 0) g = clamp(p.growth, 0.01, 0.03) * r(-0.4, 0.4); v = clamp(v * (1 + g), 0.4, 5); } out.push(v); } return out; });
+  // партия на все 30 лет: рост рынка вне кризисов — в пределах 2–5 раз; редкий сценарий, вышедший за границы, подтягивается степенью уровня
+  if (Q >= 120) { const wAll = sum(products.map(p => p.demand * p.cx)), tEnd = sum(products.map((p, k) => p.demand * p.cx * trend[k][Q - 1])) / wAll, gRaw = level[Q - 1] * tEnd, gFit = clamp(gRaw, 2.1, 4.8);
+    if (gFit !== gRaw) { const k = Math.log(gFit / tEnd) / Math.log(level[Q - 1]); for (let i = 0; i < Q; i++) level[i] = Math.pow(level[i], k); } }
+  // события по пятилеткам; рост зарплат — навсегда, но не больше двух раз за партию
+  const types = Object.keys(EVENT_TYPES), events = [], clash = { rateUp: 'rateDown', rateDown: 'rateUp', rawB: 'rawC', rawC: 'rawB' };
+  const overlaps = (type, a, b) => events.some(e => !e.fake && (e.type === type || e.type === clash[type]) && a < e.start + e.dur && e.start < b);
+  for (let blk = 0; blk * 20 < Q; blk++) {
+    const lo = Math.max(3, blk * 20 + 1), hi = Math.min(Q - 2, blk * 20 + 20); if (hi < lo) break;
+    for (let n = ri(1, 3); n > 0; n--) { const start = ri(lo, hi), left = types.filter(t => (t !== 'wages' || events.filter(e => e.type === 'wages').length < 2) && !overlaps(t, start, start + (t === 'wages' ? Q : 4))); if (!left.length) continue;
+      const type = pick(left), dur = type === 'wages' ? Q - start + 1 : Math.min(ri(2, 4), Q - start + 1); events.push({ type, start, dur, rumor: rnd() < 0.6, fake: false }); }
+    if (rnd() < 0.5) events.push({ type: pick(types.filter(t => t !== 'wages')), start: ri(lo, hi), dur: 0, rumor: true, fake: true });
+  }
+  events.sort((a, b) => a.start - b.start);
+  const rates = [];
+  for (let i = 0; i < Q; i++) { const ph = i > 0 ? phases[i - 1] : 'growth'; let rt = ph === 'crisis' ? 0.06 : ph === 'recovery' ? 0.05 : ph === 'boom' ? 0.035 : 0.04; rt += (Math.floor(rnd() * 3) - 1) * 0.005;
+    events.forEach(e => { const T = EVENT_TYPES[e.type]; if (!e.fake && T.rate && i + 1 >= e.start && i + 1 < e.start + e.dur) rt += T.rate; }); rates.push(Math.round(clamp(rt, c.rateMin, c.rateMax) * 1000) / 1000); }
+  const nF = Q - 1, nErr = Math.max(1, Math.round(nF * r(0.20, 0.30))), idx = []; for (let i = 0; i < nF; i++) idx.push(i);
+  for (let i = idx.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); const t = idx[i]; idx[i] = idx[j]; idx[j] = t; }
+  const newsErr = new Array(Q).fill(0); idx.slice(0, nErr).forEach(i => { newsErr[i] = rnd() < 0.5 ? 1 : 2; });
+  return { random: true, long: true, quarters: Q, shape, level, phases, events, rates, newsErr, crisisStarts: crisisStarts.map(x => x + 1), noCrisis: false, trend };
+}
 // Действующие в квартале q поправки от событий (в классике — единицы).
 function eventMods(state, q) {
   const ps = state.settings.products, sc = state.scenario;
@@ -404,7 +457,8 @@ function demandMultiplier(state, p, q) {
   const sc = state.scenario, i = q - 1;
   if (i < 0 || i >= sc.quarters) return 0;
   const shock = 1 + (sc.shape[i] - 1) * p.crisis;
-  return Math.max(0.2, shock) * sc.level[i] * Math.pow(1 + p.growth, i);
+  const tr = sc.trend ? sc.trend[state.settings.products.indexOf(p)] : null; // длинная партия: тренд товара записан в сценарии
+  return Math.max(0.2, shock) * sc.level[i] * (tr && tr[i] != null ? tr[i] : Math.pow(1 + p.growth, i));
 }
 function baseDemand(state, p, q) {
   if (!(state.settings.products.length && p)) return 0;
@@ -492,18 +546,18 @@ function freshTeam(t, i, consts, products) {
 function createGame(opts) {
   const consts = Object.assign({}, clone(DEFAULT_CONSTS), opts.consts || {});
   const products = (opts.products || clone(DEFAULT_PRODUCTS)).map((p, i) => Object.assign({}, clone(DEFAULT_PRODUCTS[i] || DEFAULT_PRODUCTS[0]), p));
-  const years = clamp(Math.round(opts.years || 3), 2, 5);
+  const years = clamp(Math.round(opts.years || 3), 2, 30), long = years > 5; // больше 5 лет — длинная партия: рынок с циклами, новые соперники
   const teams = (opts.teams || []).map((t, i) => freshTeam(t, i, consts, products));
   if (teams.length < 2) throw new Error('Нужно минимум 2 предприятия');
   if (teams.length > 4) throw new Error('Максимум 4 предприятия');
   const seed = opts.seed != null ? opts.seed : hashStr(String(opts.name || '') + (opts.createdAt || Date.now()));
-  const marketMode = opts.marketMode === 'random' ? 'random' : 'classic';
+  const marketMode = long || opts.marketMode === 'random' ? 'random' : 'classic';
   const hard = !!opts.hard || teams.some(t => t.ai);
   const state = {
     version: 2, name: opts.name || 'Партия', createdAt: opts.createdAt || new Date().toISOString(),
-    settings: { years, mode: opts.mode === 'max' ? 'max' : 'lite', currency: opts.currency || '₽', products, marketMode, hard },
+    settings: { years, mode: opts.mode === 'max' ? 'max' : 'lite', currency: opts.currency || '₽', products, marketMode, hard, long },
     consts, seed,
-    scenario: marketMode === 'random' ? buildRandomScenario(years, consts, seed) : buildScenario(years, consts), startTeams: teams.length,
+    scenario: long ? buildLongScenario(years, consts, seed, products) : marketMode === 'random' ? buildRandomScenario(years, consts, seed) : buildScenario(years, consts), startTeams: teams.length,
     quarter: 1, finished: false, teams, deals: [], scheduledLoans: [], market: { history: [] }, log: [],
   };
   state.tasks = {}; teams.forEach(t => { if (t.kind === 'human') state.tasks[t.id] = pickTasks(seed, t.id); });
@@ -1081,12 +1135,27 @@ function closeQuarter(input) {
   state.quarter = q + 1;
   T.forEach(t => { const r = t.history[t.history.length - 1]; r.value = value(state, t); r.share = marketShareLastYear(state, t); });
   if (state.quarter > state.scenario.quarters) { state.finished = true; state.quarter = state.scenario.quarters + 1; }
-  // если осталось меньше двух живых — партия завершена
+  // длинная партия: на место ушедшего соперника через полтора года приходит новый — с половиной средних ресурсов действующих предприятий
+  if (hard && state.settings.long && !state.finished) {
+    state.entrants = state.entrants || [];
+    T.forEach(t => { if (t.kind !== 'bot' || t.replaced || (t.status !== 'bankrupt' && t.status !== 'sold')) return; t.replaced = true;
+      const due = q + c.entrantDelay; if (due <= state.scenario.quarters - 3) { state.entrantCount = (state.entrantCount || 0) + 1; state.entrants.push({ quarter: due, n: state.entrantCount }); } });
+    state.entrants.forEach(e => { if (e.done || e.quarter > state.quarter || !Engine.makeEntrant) return; e.done = true;
+      const act = T.filter(t => t.status === 'active'); if (act.length >= 4) return;
+      const nt = freshTeam(Engine.makeEntrant(state, e.n), 0, c, ps), avg = (f) => act.length ? sum(act.map(f)) / act.length : 0;
+      nt.id = Math.max.apply(null, T.map(t => t.id)) + 1; nt.entrant = true; nt.enteredQuarter = state.quarter; e.id = nt.id;
+      nt.machines = Math.max(c.startMachines, Math.round(avg(t => t.machines) * c.entrantShare)); nt.workers = nt.machines * c.workersPerMachine;
+      nt.cash = Math.max(c.startCash, Math.round(avg(t => Math.max(0, t.cash - t.debt)) * c.entrantShare));
+      T.push(nt); marketRow.signals = [{ kind: 'entrant', text: 'На рынок вышло новое предприятие — «' + nt.name + '».' }].concat(marketRow.signals || []);
+      state.log.push('Кв. ' + state.quarter + ': на рынок вышло новое предприятие «' + nt.name + '»'); });
+  }
+  // если осталось меньше двух живых — партия завершена; в длинной партии человек ждёт нового соперника, если тот уже в пути
   const alive = T.filter(t => t.status === 'active');
-  if (alive.length < 2 && !state.finished) { state.finished = true; state.log.push(hard && alive.length === 1 ? 'Рынок захвачен: «' + alive[0].name + '» — единственное действующее предприятие, партия завершена досрочно' : 'Партия завершена досрочно: осталось ' + alive.length + ' действующих предприятий'); }
+  const waiting = hard && state.settings.long && alive.some(t => t.kind === 'human') && (state.entrants || []).some(e => !e.done);
+  if (alive.length < 2 && !state.finished && !waiting) { state.finished = true; state.log.push(hard && alive.length === 1 ? 'Рынок захвачен: «' + alive[0].name + '» — единственное действующее предприятие, партия завершена досрочно' : 'Партия завершена досрочно: осталось ' + alive.length + ' действующих предприятий'); }
   if (hard) { // состояние на конец квартала пишем в историю; «на грани» или «в беде» три квартала подряд → владельцы сами ищут покупателя (публичная новость)
-    T.forEach(t => { if (t.status === 'active') t.history[t.history.length - 1].distress = distress(state, t); });
-    state.forSale = state.finished ? [] : T.filter(t => t.status === 'active' && t.kind === 'bot' && leaderId(state) !== t.id && (t.history[t.history.length - 1].distress === 'edge' || troubleStreak(t) >= state.consts.forSaleStreak)).map(t => t.id);
+    T.forEach(t => { if (t.status === 'active' && t.history.length) t.history[t.history.length - 1].distress = distress(state, t); });
+    state.forSale = state.finished ? [] : T.filter(t => t.status === 'active' && t.kind === 'bot' && t.history.length && leaderId(state) !== t.id && (t.history[t.history.length - 1].distress === 'edge' || troubleStreak(t) >= state.consts.forSaleStreak)).map(t => t.id);
   }
   return state;
 }
@@ -1114,9 +1183,10 @@ function buildSignals(state, R, row, prev) {
 // Исходное состояние той же партии: те же настройки, сценарий, зерно, соперники — история пустая.
 function initialState(state) {
   const st = clone(state), c = st.consts, ps = st.settings.products;
-  st.teams = st.teams.map((t, i) => { const f = freshTeam({ name: t.name, kind: t.kind, botProfile: t.botProfile, pin: t.pin, ai: t.ai, botCustom: t.botCustom }, i, c, ps); f.id = t.id; return f; });
+  st.teams = st.teams.filter(t => !t.entrant).map((t, i) => { const f = freshTeam({ name: t.name, kind: t.kind, botProfile: t.botProfile, pin: t.pin, ai: t.ai, botCustom: t.botCustom }, i, c, ps); f.id = t.id; return f; });
   st.quarter = 1; st.finished = false; st.deals = []; st.scheduledLoans = []; st.market = { history: [] }; st.log = [];
   if (st.settings.hard) { st.bankLot = null; st.forSale = []; }
+  if (st.settings.long) { st.entrants = []; st.entrantCount = 0; }
   return st;
 }
 function rematchOptions(state) { if (!state.setup) return null; const o = clone(state.setup); if (!o.consts) delete o.consts; if (!o.products) delete o.products; o.rematchOf = state.name; o.name = state.name.replace(/ — реванш( \d+)?$/, '') + ' — реванш'; return o; }
@@ -1246,7 +1316,7 @@ const Engine = {
   capacity, creditLimit, bankRate, isCrisis, qualityScore, unitRawCost, willingness, value, ownValue, valueBreakdown, rating, marketShareLastYear,
   emptyDecision, validateDecision, plannedSpend, setDecision, research, addDeal, removeDeal, closeQuarter, botDecide,
   publicMarket, teamReport, clone, clamp, sum, mulberry32, hashStr,
-  EVENT_TYPES, buildRandomScenario, eventMods, eventsFor, wageNow, trueRatio, reportedRatio, newsCategory, bankCrisis, dossier,
+  EVENT_TYPES, buildRandomScenario, buildLongScenario, eventMods, eventsFor, wageNow, trueRatio, reportedRatio, newsCategory, bankCrisis, dossier,
   initialState, canReplay, replay, rematchOptions, decideBot,
   distress, DISTRESS_TEXT, troubleStreak, leaderId, tangibleValue, askPrice, askRange, buyable, TASKS, taskStatus, upgradeState,
 };
@@ -1330,6 +1400,16 @@ function generateTable(opts) {
     if (level === 1) t.botCustom = customProfile(ch);
     return t;
   });
+}
+// Длинная партия: новый соперник на место ушедшего. Уровень — один из уровней исходного стола, школа и характер случайные, всё из зерна партии.
+function makeEntrant(state, n) {
+  const rnd = mulberry32(((state.seed >>> 0) ^ Math.imul(n + 101, 0x85EBCA6B)) >>> 0), pick = (arr) => arr[Math.floor(rnd() * arr.length)];
+  const levels = ((state.setup && state.setup.teams) || []).filter(t => t.ai).map(t => t.ai.level), level = levels.length ? pick(levels) : 2;
+  const school = level > 1 ? pick(SCHOOL_KEYS) : null, ch = makeCharacter(rnd, school, null);
+  const used = state.teams.map(t => t.name), free = NAMES.filter(x => !used.includes(x));
+  const t = { name: free.length ? pick(free) : 'Новое предприятие ' + n, kind: 'bot', botProfile: 'middle', ai: { level, school, character: ch } };
+  if (level === 1) t.botCustom = customProfile(ch);
+  return t;
 }
 function describeAi(team) {
   const ai = team.ai; if (!ai) return null;
@@ -1671,7 +1751,7 @@ function smartDecide(state, team) {
 }
 
 E.LEVELS = LEVELS; E.SCHOOLS = SCHOOLS; E.BOT_NAMES = NAMES;
-E.makeCharacter = makeCharacter; E.customProfile = customProfile; E.generateTable = generateTable; E.describeAi = describeAi;
+E.makeCharacter = makeCharacter; E.customProfile = customProfile; E.generateTable = generateTable; E.makeEntrant = makeEntrant; E.describeAi = describeAi;
 E.smartDecide = smartDecide; E.simProduct = simProduct; E.publicLeader = publicLeader;
 })(typeof window !== 'undefined' ? window : globalThis);
 
@@ -1679,7 +1759,7 @@ E.smartDecide = smartDecide; E.simProduct = simProduct; E.publicLeader = publicL
 (function (root) {
 'use strict';
 const E = (typeof module !== 'undefined' && module.exports) ? require('./engine.js') : root.Engine;
-const sum = E.sum, clone = E.clone;
+const sum = E.sum, clone = E.clone, clamp = E.clamp;
 const fmt = (x) => (x == null || isNaN(x)) ? '—' : String(Math.round(x)).replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
 const lastH = (st, id) => { const t = st.teams.find(x => x.id === id); return t && t.history.length ? t.history[t.history.length - 1] : null; };
 const FORMAT = 'zahvat-rynka-report', MARK_A = '=====НАЧАЛО ТЕХНИЧЕСКОГО БЛОКА=====', MARK_B = '=====КОНЕЦ ТЕХНИЧЕСКОГО БЛОКА=====';
@@ -1721,7 +1801,7 @@ function decisionLine(st, d) {
   if (d.bid && d.bid.count) other.push('заявка на станки банка: ' + d.bid.count + ' шт. по ' + fmt(d.bid.price));
   return '    решение: ' + (prods.length ? prods.join('; ') : 'ничего не производить') + (other.length ? ' | ' + other.join(', ') : '');
 }
-function resultLine(st, h) {
+function resultLine(st, h, brief) {
   const ps = st.settings.products;
   const prods = h.products.map((pr, i) => pr.offered > 0 ? `${ps[i].name}: продано ${fmt(pr.sold)} из ${fmt(pr.offered)}${pr.lost > 0.5 ? ', не хватило ' + fmt(pr.lost) : ''}${pr.invEnd ? ', остаток ' + fmt(pr.invEnd) : ''}` : null).filter(Boolean);
   let s = '    итог: ' + (prods.join('; ') || 'продаж нет') + `\n    деньги: выручка ${fmt(h.revenue)}, прибыль ${fmt(h.profit)}, на счёте ${fmt(h.cashEnd)}, долг ${fmt(h.debtEnd)}; станков ${h.machines}${h.machinesArriving ? ' (+' + h.machinesArriving + ' в пути)' : ''}, рабочих ${h.workers} (обучено ${h.trained}), репутация ${h.brand}, стоимость ${fmt(h.value)}`;
@@ -1730,7 +1810,7 @@ function resultLine(st, h) {
   if (h.bankrupt) s += '\n    ! БАНКРОТСТВО';
   if (h.notes && h.notes.length) s += '\n    заметки: ' + h.notes.join('; ');
   if (h.adsEffect) s += '\n    ' + adsEffectText(h.adsEffect);
-  if (h.intel) s += '\n' + intelText(st, h.intel);
+  if (h.intel) { const it = brief ? { dossier: h.intel.dossier } : h.intel; if (it.research || it.dossier) s += '\n' + intelText(st, it); }
   return s;
 }
 // reveal — показывать ли секреты ботов (уровни, школы, решения, сценарий вперёд). По умолчанию: только в законченной партии или в открытом (не сложном) режиме.
@@ -1766,17 +1846,21 @@ function exportText(state, opt) {
   }
   if (done && reveal && E.canReplay(st)) st.teams.filter(x => x.kind === 'human').forEach(x => { try { const tx = debriefText(debrief(st, x.id)); if (tx) { L.push(''); L.push(tx); } } catch (e) { L.push(''); L.push('РАЗБОР ПАРТИИ: не удалось посчитать (' + e.message + ')'); } });
   if (st.tasks && E.taskStatus) st.teams.filter(x => x.kind === 'human' && st.tasks[x.id]).forEach(x => { L.push(''); L.push(`ЗАДАНИЯ АКЦИОНЕРОВ — «${x.name}» (только звёзды, на стоимость не влияют):`); E.taskStatus(st, x).forEach(k => L.push(`  ${k.done ? '★' : k.failed ? '✗' : '…'} ${k.title} — ${k.progress}`)); });
-  L.push(''); L.push('ХОД ПАРТИИ ПО КВАРТАЛАМ');
+  // Длинная партия: игрок и рынок — по кварталам за всю партию; соперники — итогами года; новости, сигналы и купленные исследования — за последние 5 лет.
+  const long = !!st.settings.long, recent = long ? played - 19 : 1;
+  L.push(''); L.push('ХОД ПАРТИИ ПО КВАРТАЛАМ' + (long ? ' (длинная партия: соперники — итогами года; новости, сигналы и исследования — за последние 5 лет)' : ''));
   for (let q = 1; q <= played; q++) {
     const row = st.market.history.find(m => m.quarter === q);
     L.push(''); L.push(`— Квартал ${q} (год ${Math.ceil(q / 4)}, кв. ${((q - 1) % 4) + 1}) —`);
     if (row) {
-      if (row.news) L.push('  новости: ' + (row.news.nowText || '') + ' ' + (row.news.text || ''));
+      if (row.news && q >= recent) L.push('  новости: ' + (row.news.nowText || '') + ' ' + (row.news.text || ''));
       L.push('  рынок: ' + row.products.map((x, i) => `${ps[i].name}: спрос ${fmt(x.demand)}, продано ${fmt(x.sold)}, продавцов ${x.sellers}, ср. цена ${x.avgPrice ? fmt(x.avgPrice) : '—'}`).join(' | '));
-      if (row.signals && row.signals.length) L.push('  сигналы: ' + row.signals.map(s => s.text).join(' '));
+      if (row.signals && row.signals.length) { const sg = q >= recent ? row.signals : row.signals.filter(g => g.kind === 'sale' || g.kind === 'entrant'); if (sg.length) L.push('  сигналы: ' + sg.map(s => s.text).join(' ')); }
     }
     st.teams.forEach(t => { const h = t.history.find(x => x.quarter === q); if (!h) return; if (t.kind === 'bot' && !reveal) return;
-      L.push(`  ${t.name}${t.kind === 'bot' ? ' (бот)' : ''}:`); L.push(decisionLine(st, h.decision)); L.push(resultLine(st, h)); });
+      if (long && t.kind === 'bot') { if (q % 4 && q !== played && h.status === 'active') return; const yr = t.history.filter(x => x.quarter > (Math.ceil(q / 4) - 1) * 4 && x.quarter <= q);
+        L.push(`  ${t.name} (бот), итоги года ${Math.ceil(q / 4)}: выручка ${fmt(sum(yr.map(x => x.revenue || 0)))}, прибыль ${fmt(sum(yr.map(x => x.profit || 0)))}, станков ${h.machines}, рабочих ${h.workers}, долг ${fmt(h.debtEnd)}, стоимость ${fmt(h.value)}, доля ${Math.round((h.share || 0) * 100)} %${h.status !== 'active' ? ', ' + ({ bankrupt: 'БАНКРОТ', sold: 'продано' }[h.status] || h.status) : ''}${h.offerResult && h.offerResult.result === 'accepted' ? ', купил «' + h.offerResult.targetName + '»' : ''}`); return; }
+      L.push(`  ${t.name}${t.kind === 'bot' ? ' (бот)' : ''}:`); L.push(decisionLine(st, h.decision)); L.push(resultLine(st, h, long && q < recent)); });
   }
   if (reveal && E.canReplay(st)) {
     const lite = E.initialState(st); if (lite.setup && lite.setup.teams) lite.setup.teams.forEach(t => { t.pin = ''; }); lite.teams.forEach(t => { t.pin = ''; const orig = st.teams.find(x => x.id === t.id); t.history = orig.history.map(h => t.kind === 'human' ? { quarter: h.quarter, decision: h.decision, deals: h.deals || [], status: h.status } : { quarter: h.quarter, deals: h.deals || [] }); });
@@ -1806,7 +1890,9 @@ function fileName(state) { const d = new Date(state.createdAt || Date.now()); co
 // По кварталу сравнивается стоимость предприятия сразу после квартала; «до конца партии» — итоговая стоимость.
 const mny = (x) => { const a = Math.abs(x), sg = x < 0 ? '−' : ''; return a >= 1e6 ? sg + (a / 1e6).toFixed(2).replace('.', ',').replace(/,?0+$/, '') + ' млн' : a >= 1e3 ? sg + Math.round(a / 1e3) + ' тыс.' : sg + Math.round(a); };
 const PHASE = { growth: 'рост', boom: 'бурный рост', crisis: 'кризис', recovery: 'восстановление' };
-function debrief(final, teamId) {
+// Длинная партия (больше 6 лет) разбирается окном в 5 лет: opt.from — первый квартал окна, по умолчанию последние 20 кварталов.
+// Крупные решения внутри окна по-прежнему сравниваются по итогу всей партии.
+function debrief(final, teamId, opt) {
   const t0 = Date.now(), st = final, ps = st.settings.products, c = st.consts, me = st.teams.find(t => t.id === teamId);
   if (!me) return null;
   const rt = E.rating(st), played = Math.max.apply(null, [0].concat(st.teams.map(t => t.history.length)));
@@ -1815,7 +1901,9 @@ function debrief(final, teamId) {
   const win = st.teams.find(t => t.id === rt[0].id); out.winner = { id: win.id, name: win.name, value: rt[0].value, breakdown: win.status === 'active' ? E.valueBreakdown(st, win) : null };
   chronicleOf(st, me, out);
   if (!E.canReplay(st)) { out.reason = 'Партия начата в старой версии: решения по кварталам не записывались, поэтому суммы посчитать нельзя.'; return out; }
-  const before = {}; const re = E.replay(st, { onBefore: (s, q) => { before[q] = E.clone(s); } }); out.runs += played;
+  const WIN = 20, longGame = played > 24, from = longGame ? clamp(Math.round((opt && opt.from) || played - WIN + 1), 1, Math.max(1, played - WIN + 1)) : 1, to = longGame ? Math.min(played, from + WIN - 1) : played;
+  if (longGame) out.window = { from, to, size: WIN };
+  const before = {}; const re = E.replay(st, { onBefore: (s, q) => { if (q >= from && q <= to) before[q] = E.clone(s); } }); out.runs += played;
   if (!st.teams.every(t => E.value(re, re.teams.find(x => x.id === t.id)) === E.value(st, t))) { out.reason = 'Переигровка не сошлась с итогом партии, поэтому суммы не считаются.'; return out; }
   out.ok = true;
   const valOf = (s, id) => E.value(s, s.teams.find(t => t.id === id)), finalOf = (id) => E.value(st, st.teams.find(t => t.id === id));
@@ -1911,6 +1999,7 @@ function debriefText(db) {
   if (!db) return ''; const L = [];
   L.push(`РАЗБОР ПАРТИИ — «${db.name}»: место ${db.place} из ${db.of}, стоимость ${fmt(db.value)}${db.winner.id !== db.teamId ? `; победитель «${db.winner.name}» — ${fmt(db.winner.value)}` : ' — победа'}.`);
   if (!db.ok) { L.push('  ' + (db.reason || 'Суммы не посчитаны.')); return L.join('\n'); }
+  if (db.window) L.push(`  Партия длинная: разобраны кварталы ${db.window.from}–${db.window.to} (5 лет). Крупные решения сравниваются по итогу всей партии.`);
   L.push('  Каждая сумма — разница двух расчётов движка: как было и как было бы с другим решением при тех же соперниках.');
   L.push('  Решения, которые принесли успех:'); (db.good.length ? db.good : [{ q: '—', text: 'заметных не найдено' }]).forEach(x => L.push(`    кв. ${x.q}: ${x.text}`));
   L.push('  Неудачные решения:'); (db.bad.length ? db.bad : [{ q: '—', text: 'крупных потерь не найдено' }]).forEach(x => L.push(`    кв. ${x.q}: ${x.text}`));
@@ -2022,7 +2111,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = Coach; els
 'use strict';
 const E = window.Engine;
 const SAVE_KEY = 'zahvat-rynka-v1';
-const TEAM_COLORS = ['var(--t1)','var(--t2)','var(--t3)','var(--t4)'];
+const TEAM_COLORS = ['var(--t1)','var(--t2)','var(--t3)','var(--t4)','#ff8a5c','#5ad1c8','#e87bd0','#c8d0e0'];
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmtInt = (n) => (Math.round(n) || 0).toLocaleString('ru-RU');
 function fmtMoney(n, short) {
@@ -2036,7 +2125,7 @@ const money = (n) => `<span class="mono ${n < 0 ? 'neg' : ''}">${fmtMoney(n)}</s
 const signed = (n) => `<span class="mono ${n > 0 ? 'pos' : n < 0 ? 'neg' : ''}">${n > 0 ? '+' : ''}${fmtMoney(n)}</span>`;
 const cur = () => App.state ? App.state.settings.currency : '₽';
 const qLabel = (q, st) => { const Q = (st || App.state).scenario.quarters; if (q > Q) return 'Финал'; return `Год ${Math.ceil(q / 4)}, квартал ${((q - 1) % 4) + 1}`; };
-const teamColor = (t) => TEAM_COLORS[(t.id - 1) % 4];
+const teamColor = (t) => TEAM_COLORS[(t.id - 1) % 8];
 const dot = (t) => `<span class="team-color" style="background:${teamColor(t)}"></span>`;
 // сложный режим: цифры соперников-ботов скрыты до финала
 const hideBot = (t) => t.kind === 'bot' && !!App.state.settings.hard && !App.state.finished;
@@ -2050,7 +2139,7 @@ const statusPill = (t) => t.status === 'active' ? '' : t.status === 'bankrupt' ?
 const App = {
   state: null, view: { screen: 'home' }, toastTimer: null,
   storageOk: (function () { try { localStorage.setItem('__t', '1'); const ok = localStorage.getItem('__t') === '1'; localStorage.removeItem('__t'); return ok; } catch (e) { return false; } })(),
-  save() { try { localStorage.setItem(SAVE_KEY, JSON.stringify({ state: this.state, view: this.view })); } catch (e) { console.warn('save failed', e); } },
+  save() { try { localStorage.setItem(SAVE_KEY, JSON.stringify({ state: this.state, view: this.view })); this.saveFailed = false; } catch (e) { console.warn('save failed', e); if (this.storageOk && !this.saveFailed) { this.saveFailed = true; this.toast('Партия не поместилась в память браузера — сохраните её в файл через «Меню»'); } } },
   load() { try { const raw = localStorage.getItem(SAVE_KEY); if (!raw) return false; const d = JSON.parse(raw); if (!d.state) return false; this.state = E.upgradeState(d.state); Coach.backfillIntel(this.state); this.view = d.view && d.view.screen ? d.view : { screen: 'board' }; if (this.view.screen === 'team' || this.view.screen === 'report') this.view.unlocked = false; return true; } catch (e) { return false; } },
   hasSave() { try { const d = JSON.parse(localStorage.getItem(SAVE_KEY) || 'null'); return !!(d && d.state); } catch (e) { return false; } },
   go(screen, params) { this.view = Object.assign({ screen }, params || {}); this.save(); render(); window.scrollTo(0, 0); },
@@ -2064,6 +2153,7 @@ const App = {
 
 // ---------- экраны ----------
 function storageWarn() {
+  if (App.saveFailed) return `<div class="warn-box" style="margin-bottom:12px"><b>Партия не поместилась в память браузера и сейчас не сохраняется.</b> Откройте «Меню» → «Сохранить партию в файл» и не закрывайте страницу, пока не сохраните.</div>`;
   if (App.storageOk) return '';
   return `<div class="warn-box" style="margin-bottom:12px"><b>Партия не сохраняется автоматически.</b> Так бывает, когда файл открыт из «Файлов» на телефоне. Не закрывайте эту страницу до конца партии — иначе придётся начинать заново. Выгрузить партию в файл можно через «Меню».</div>`;
 }
@@ -2084,7 +2174,8 @@ function screenSetup() {
   const v = App.view; if (!v.draft) v.draft = defaultDraft(); else if (!v.draft.humans) v.draft = Object.assign(defaultDraft(), v.draft); // черновик, сохранённый прошлой версией игры
   const d = v.draft;
   const profiles = Object.keys(E.BOT_PROFILES);
-  const solo = d.rivalMode !== 'classic';
+  if (d.game === 'long') { if (d.rivalMode === 'classic') d.rivalMode = 'mystery'; if (!(d.years > 5)) d.years = 30; d.marketMode = 'random'; } else if (d.years > 5) d.years = 3; // длинная партия — только против умных соперников и на рынке с циклами
+  const long = d.game === 'long', solo = d.rivalMode !== 'classic';
   const maxR = Math.max(0, 4 - d.humans.length);
   const allowed = (d.rivalMode === 'preset' ? PRESET_RIVALS[d.preset] : [1, 2, 3]).filter(n => n <= maxR);
   if (allowed.length && !allowed.includes(+d.rivals)) d.rivals = allowed[allowed.length - 1];
@@ -2101,7 +2192,7 @@ function screenSetup() {
   const rivalsSel = `<div class="field"><label>Сколько соперников</label><select id="s_rivals" data-rr="1" ${allowed.length <= 1 ? 'disabled' : ''}>${allowed.map(n => `<option value="${n}" ${+d.rivals === n ? 'selected' : ''}>${n}</option>`).join('')}</select></div>`;
   const rivalsCard = `<div class="card accent" style="margin-top:14px"><h3>Соперники</h3>
     <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px">
-      <div class="field"><label>Кто играет против вас</label><select id="s_rivalMode" data-rr="1"><option value="mystery" ${d.rivalMode === 'mystery' ? 'selected' : ''}>Загадка — соперников назначает игра</option><option value="preset" ${d.rivalMode === 'preset' ? 'selected' : ''}>Готовый состав</option><option value="classic" ${d.rivalMode === 'classic' ? 'selected' : ''}>Выбрать самому (классика: простые боты, люди)</option></select></div>
+      <div class="field"><label>Кто играет против вас</label><select id="s_rivalMode" data-rr="1"><option value="mystery" ${d.rivalMode === 'mystery' ? 'selected' : ''}>Загадка — соперников назначает игра</option><option value="preset" ${d.rivalMode === 'preset' ? 'selected' : ''}>Готовый состав</option>${long ? '' : `<option value="classic" ${d.rivalMode === 'classic' ? 'selected' : ''}>Выбрать самому (классика: простые боты, люди)</option>`}</select></div>
       ${d.rivalMode === 'mystery' ? `<div class="field"><label>Сила стола</label><select id="s_strength" data-rr="1">${Object.keys(STRENGTHS).map(k => `<option value="${k}" ${d.strength === k ? 'selected' : ''}>${STRENGTHS[k]}</option>`).join('')}</select></div>${rivalsSel}` : ''}
       ${d.rivalMode === 'preset' ? `<div class="field"><label>Состав</label><select id="s_preset" data-rr="1">${Object.keys(PRESETS).map(k => `<option value="${k}" ${d.preset === k ? 'selected' : ''}>${PRESETS[k]}</option>`).join('')}</select></div>${rivalsSel}` : ''}
     </div>
@@ -2114,11 +2205,12 @@ function screenSetup() {
   <div class="grid grid-2">
     <div class="card"><h3>Партия</h3>
       <div class="field"><label>Название партии</label><input id="s_name" value="${esc(d.name)}"></div>
+      <div class="field"><label>Игра</label><select id="s_game" data-rr="1"><option value="short" ${long ? '' : 'selected'}>Короткая партия — 2–5 лет</option><option value="long" ${long ? 'selected' : ''}>Длинная партия — до 30 лет</option></select>${long ? '<div class="hint">Длинная партия играется в несколько заходов (30 лет ≈ 8–10 часов), сохраняется сама. Рынок идёт деловыми циклами: кризис раз в 4–7 лет, события всю дорогу, за 30 лет рынок вырастает в 2–4,5 раза. На место купленного или разорившегося соперника через полтора года приходит новый. Соперники — только умные (загадка или готовый состав).</div>' : ''}</div>
       <div class="grid" style="grid-template-columns:1fr 1fr;gap:10px">
-        <div class="field"><label>Длительность</label><select id="s_years">${[2, 3, 4, 5].map(y => `<option value="${y}" ${d.years == y ? 'selected' : ''}>${y} года — ${y * 4} кварталов${y === 2 ? ' (≈1 час)' : y === 3 ? ' (≈2 часа)' : ''}</option>`).join('')}</select></div>
+        <div class="field"><label>Длительность</label><select id="s_years">${(long ? [10, 15, 20, 25, 30] : [2, 3, 4, 5]).map(y => `<option value="${y}" ${d.years == y ? 'selected' : ''}>${y} ${y < 5 ? 'года' : 'лет'} — ${y * 4} кварталов${y === 2 ? ' (≈1 час)' : y === 3 ? ' (≈2 часа)' : ''}</option>`).join('')}</select></div>
         <div class="field"><label>Режим</label><select id="s_mode"><option value="lite" ${d.mode === 'lite' ? 'selected' : ''}>Лайт — производство, продажи, банк</option><option value="max" ${d.mode === 'max' ? 'selected' : ''}>Макс — плюс займы и покупка предприятий</option></select></div>
       </div>
-      <div class="field"><label>Рынок</label><select id="s_market"><option value="random" ${d.marketMode === 'random' ? 'selected' : ''}>Случайный — кризис может прийти когда угодно</option><option value="classic" ${d.marketMode === 'classic' ? 'selected' : ''}>Классический — рост, кризис во втором году, восстановление</option></select><div class="hint">Случайный рынок: каждый раз свой сценарий, события (мода, импорт, госзаказ, сырьё, ставка, зарплаты), плавающая ставка банка. Новости иногда ошибаются; точный прогноз — в исследовании.</div></div>
+      <div class="field" ${long ? 'hidden' : ''}><label>Рынок</label><select id="s_market"><option value="random" ${d.marketMode === 'random' ? 'selected' : ''}>Случайный — кризис может прийти когда угодно</option><option value="classic" ${d.marketMode === 'classic' ? 'selected' : ''}>Классический — рост, кризис во втором году, восстановление</option></select><div class="hint">Случайный рынок: каждый раз свой сценарий, события (мода, импорт, госзаказ, сырьё, ставка, зарплаты), плавающая ставка банка. Новости иногда ошибаются; точный прогноз — в исследовании.</div></div>
       <div class="field"><label>Валюта (подпись)</label><input id="s_currency" value="${esc(d.currency)}" style="max-width:120px"></div>
       <details><summary>Стартовые условия</summary><div class="grid" style="grid-template-columns:1fr 1fr 1fr;gap:10px">
         <div class="field"><label>Деньги</label><input id="s_cash" type="number" value="${d.startCash}"></div>
@@ -2147,6 +2239,7 @@ function readDraft() {
   const d = App.view.draft, has = (id) => !!document.getElementById(id);
   d.name = val('s_name'); d.years = +val('s_years'); d.mode = val('s_mode'); d.currency = val('s_currency') || '₽';
   d.startCash = +val('s_cash'); d.startMachines = +val('s_machines'); d.startWorkers = +val('s_workers');
+  if (has('s_game')) d.game = val('s_game');
   if (has('s_market')) d.marketMode = val('s_market');
   if (has('s_rivalMode')) d.rivalMode = val('s_rivalMode');
   if (has('s_strength')) d.strength = val('s_strength');
@@ -2234,7 +2327,8 @@ function screenBoard() {
   if (st.finished) return screenFinal();
   const open = App.openMode();
   const ctrl = App.controllers();
-  const rows = st.teams.map(t => {
+  const goneT = st.settings.long ? st.teams.filter(t => t.status === 'bankrupt' || t.status === 'sold') : []; // длинная партия: выбывшие — под спойлер
+  const rowOf = (t) => {
     const entered = !!t.decision;
     const controlledBy = t.status === 'subsidiary' ? st.teams.find(o => o.id === t.ownerId) : null;
     const canEnter = ctrl.includes(t);
@@ -2247,7 +2341,8 @@ function screenBoard() {
     const pub = `<span class="muted small">станков ${t.machines}${t.machinesArriving ? ' (+' + t.machinesArriving + ' в пути)' : ''} · рабочих ${t.workers}</span>`;
     const priv = open && t.status !== 'bankrupt' && t.status !== 'sold' && !hideBot(t) ? `<span class="muted small"> · деньги ${fmtMoney(t.cash)} · долг ${fmtMoney(t.debt)} · стоимость ${fmtMoney(E.value(st, t))}</span>` : '';
     return `<div class="team-row"><div>${dot(t)}<b>${esc(t.name)}</b> ${statusPill(t)}<br>${pub}${priv}</div><div class="flex">${right}</div></div>`;
-  }).join('');
+  };
+  const rows = st.teams.filter(t => !goneT.includes(t)).map(rowOf).join('') + (goneT.length ? `<details><summary>Выбывшие предприятия: ${goneT.length}</summary>${goneT.map(rowOf).join('')}</details>` : '');
   const missing = ctrl.filter(t => !t.decision);
   const yearEnd = (q - 1) % 4 === 3;
   return topbar(`<button class="btn-ghost btn-sm" data-action="deals">Сделки и банк</button><button class="btn-ghost btn-sm" data-action="menu">Меню</button>`) + `
@@ -2428,7 +2523,7 @@ function chartSvg(series, opts) {
   if (!xs.length) return '';
   const xmin = opts.xmin != null ? opts.xmin : Math.min(...xs), xmax = opts.xmax != null ? opts.xmax : Math.max(...xs);
   let ymin = Math.min(0, ...ys), ymax = Math.max(...ys, opts.zero ? 0 : 1); if (ymax === ymin) ymax = ymin + 1;
-  if (opts.tight) { const lo = Math.min(...ys), hi = Math.max(...ys), pad = (hi - lo || Math.abs(hi) || 1) * 0.12; ymin = lo - pad; ymax = hi + pad; }
+  if (opts.tight) { const lo = Math.min(...ys), hi = Math.max(...ys), pad = (hi - lo || Math.abs(hi) || 1) * 0.12; ymin = lo >= 0 ? Math.max(0, lo - pad) : lo - pad; ymax = hi + pad; }
   const band = (W - padL - padR) / (xmax - xmin + 1);
   const X = (x) => bars ? padL + band * (x - xmin + 0.5) : padL + (xmax === xmin ? 0 : (x - xmin) / (xmax - xmin)) * (W - padL - padR);
   const Y = (y) => padT + (1 - (y - ymin) / (ymax - ymin || 1)) * (H - padT - padB);
@@ -2480,18 +2575,19 @@ function journalMarket(st, j) {
   const demand = j.products.map((p, i) => ({ name: p.name, color: PROD_COLORS[i % 5], values: j.market.map(m => ({ x: m.q, y: idx(i, m.products[i].demand) })) }));
   const proj = pr && j.played ? j.products.map((p, i) => ({ name: p.name + ' — прогноз', color: PROD_COLORS[i % 5], dash: true, dots: true, legend: false, values: [{ x: j.played, y: idx(i, j.market[j.market.length - 1].products[i].demand) }, { x: j.now, y: idx(i, pr.now[i]) }, { x: j.now + 1, y: idx(i, pr.next[i]) }] })) : [];
   const level = j.products.map((p, i) => ({ name: p.name, color: PROD_COLORS[i % 5], values: j.market.map(m => ({ x: m.q, y: m.products[i].avgPrice ? Math.round((m.products[i].avgPrice / p.ref - 1) * 100) : null })) }));
-  const heat = j.played ? `<div class="tbl-wrap"><table class="heat"><tr><th style="text-align:left">Товар</th>${j.market.map(m => `<th>${m.q}</th>`).join('')}</tr>${j.products.map((p, i) => `<tr><td style="text-align:left">${esc(p.name)}</td>${j.market.map(m => { const x = m.products[i], u = x.demand > 0 ? Math.max(0, 1 - x.sold / x.demand) : 0; return `<td style="background:rgba(62,207,142,${(u * 0.6).toFixed(2)})">${Math.round(u * 100)} %<span class="s">${x.sellers} прод.</span></td>`; }).join('')}</tr>`).join('')}</table></div>` : '';
+  const mk12 = j.market.slice(-12); // в длинной партии таблица показывает последние три года
+  const heat = j.played ? `<div class="tbl-wrap"><table class="heat"><tr><th style="text-align:left">Товар</th>${mk12.map(m => `<th>${m.q}</th>`).join('')}</tr>${j.products.map((p, i) => `<tr><td style="text-align:left">${esc(p.name)}</td>${mk12.map(m => { const x = m.products[i], u = x.demand > 0 ? Math.max(0, 1 - x.sold / x.demand) : 0; return `<td style="background:rgba(62,207,142,${(u * 0.6).toFixed(2)})">${Math.round(u * 100)} %<span class="s">${x.sellers} прод.</span></td>`; }).join('')}</tr>`).join('')}</table></div>` : '';
   const errs = j.research.flatMap(r => r.products.map(p => p.err)).filter(x => x != null);
-  const res = j.research.slice().reverse().map((r, k) => `<details ${k === 0 ? 'open' : ''}><summary>Исследование, кв. ${r.q}${r.next ? ' · следующий квартал ×' + r.next.ratio.toFixed(2).replace('.', ',') : ''}</summary><div class="tbl-wrap"><table><tr><th style="text-align:left">Товар</th><th>Прогноз</th><th>Факт</th><th>Ошибка</th><th>Ко мне</th>${r.next ? '<th>След. кв.</th>' : ''}</tr>${r.products.map((p, i) => `<tr><td style="text-align:left">${esc(j.products[i].name)}</td><td>${fmtInt(p.forecast)}${p.adjusted ? '' : '*'}</td><td>${p.fact != null ? fmtInt(p.fact) : '—'}</td><td>${p.err != null ? pct(p.err) : '—'}</td><td>${p.est != null ? '≈ ' + fmtInt(p.est) : '—'}</td>${r.next ? `<td>×${r.next.products[i].toFixed(2).replace('.', ',')}</td>` : ''}</tr>`).join('')}</table></div></details>`).join('');
-  const feed = j.market.filter(m => m.signals.length).slice().reverse().map(m => `<details><summary>Кв. ${m.q} — сигналов: ${m.signals.length}</summary><ul class="small" style="padding-left:20px">${m.signals.map(s => '<li>' + esc(s) + '</li>').join('')}</ul></details>`).join('');
+  const res = j.research.slice(-12).reverse().map((r, k) => `<details ${k === 0 ? 'open' : ''}><summary>Исследование, кв. ${r.q}${r.next ? ' · следующий квартал ×' + r.next.ratio.toFixed(2).replace('.', ',') : ''}</summary><div class="tbl-wrap"><table><tr><th style="text-align:left">Товар</th><th>Прогноз</th><th>Факт</th><th>Ошибка</th><th>Ко мне</th>${r.next ? '<th>След. кв.</th>' : ''}</tr>${r.products.map((p, i) => `<tr><td style="text-align:left">${esc(j.products[i].name)}</td><td>${fmtInt(p.forecast)}${p.adjusted ? '' : '*'}</td><td>${p.fact != null ? fmtInt(p.fact) : '—'}</td><td>${p.err != null ? pct(p.err) : '—'}</td><td>${p.est != null ? '≈ ' + fmtInt(p.est) : '—'}</td>${r.next ? `<td>×${r.next.products[i].toFixed(2).replace('.', ',')}</td>` : ''}</tr>`).join('')}</table></div></details>`).join('');
+  const feed = j.market.filter(m => m.signals.length).slice(-12).reverse().map(m => `<details><summary>Кв. ${m.q} — сигналов: ${m.signals.length}</summary><ul class="small" style="padding-left:20px">${m.signals.map(s => '<li>' + esc(s) + '</li>').join('')}</ul></details>`).join('');
   return (j.played ? jCard('Спрос по товарам, % к первому кварталу', chartSvg(demand.concat(proj), { fit: true, tight: true, xmin: 1, xmax: jXmax(j, 2), fmt: (y) => Math.round(y) + ' %', title: 'Спрос по товарам' }), 'Сплошная линия — итоги рынка, они бесплатные. ' + (pr ? 'Пунктир — прогноз: ' + (pr.source === 'current' ? 'этот квартал из купленного исследования (± 10 %)' + (pr.next.some(x => x != null) ? ' и следующий — по точному изменению спроса.' : '.') : 'этот квартал по прошлому исследованию — оно называло точное изменение спроса.') : j.finished ? '' : 'Купите исследование — появится пунктир с прогнозом на этот и следующий квартал.')) : '')
-    + (j.played ? jCard('Сколько спроса осталось без покупки', heat, 'Чем зеленее клетка, тем больше покупателей ушли ни с чем: товара не хватило или он показался дорогим. Мелко — сколько продавцов было в товаре. Зелёная клетка с одним-двумя продавцами — место, куда стоит идти.') : '')
+    + (j.played ? jCard('Сколько спроса осталось без покупки', heat, (j.market.length > 12 ? 'Последние 12 кварталов. ' : '') + 'Чем зеленее клетка, тем больше покупателей ушли ни с чем: товара не хватило или он показался дорогим. Мелко — сколько продавцов было в товаре. Зелёная клетка с одним-двумя продавцами — место, куда стоит идти.') : '')
     + (j.played ? jCard('Цены рынка к справочным, %', chartSvg(level, { fit: true, tight: true, zero: true, xmin: 1, xmax: jXmax(j), fmt: (y) => (y > 0 ? '+' : '') + Math.round(y) + ' %', title: 'Цены рынка' }), 'Выше нуля — рынок продаёт дороже справочной цены, и покупателей приходит меньше. Резкий провал линии — кто-то сбивает цену.') : '')
     + jCard('Купленные исследования', res ? res + (errs.length ? `<div class="hint">Средняя ошибка прогноза спроса по закрытым кварталам: ${(errs.reduce((a, b) => a + Math.abs(b), 0) / errs.length * 100).toFixed(1).replace('.', ',')} %. * — спрос при справочных ценах: цен прошлого квартала не было.</div>` : '') : '<p class="muted small" style="margin:0">Пока ни одного. Исследование записывается сюда в момент покупки.</p>')
     + (feed ? jCard('Лента рынка по кварталам', feed) : '');
 }
 function journalProduct(st, j, prod, t) {
-  const p = j.products[prod], others = j.rivals, tc = (id) => teamColor({ id });
+  const p = j.products[prod], since = j.played - 19, others = j.rivals.filter(r => r.status === 'active' || Object.keys(r.products[prod]).some(q => +q >= since)), tc = (id) => teamColor({ id });
   const known = (r, f) => Object.keys(r.products[prod]).map(Number).sort((a, b) => a - b).map(q => ({ x: q, y: r.products[prod][q][f] })).filter(v => v.y != null);
   const prices = [{ name: 'Вы', color: tc(t.id), dots: true, values: j.mine.map(m => ({ x: m.q, y: m.products[prod].price })) }]
     .concat(others.map(r => ({ name: r.name, color: tc(r.id), dots: true, values: known(r, 'price') })).filter(s => s.values.length))
@@ -2502,21 +2598,22 @@ function journalProduct(st, j, prod, t) {
   const mk = [{ name: 'Спрос', color: PROD_COLORS[prod % 5], values: j.market.map(m => ({ x: m.q, y: m.products[prod].demand })) }, { name: 'Продано всеми', color: '#c8d0e0', values: j.market.map(m => ({ x: m.q, y: m.products[prod].sold })) }]
     .concat(pr && lastM ? [{ name: 'Прогноз спроса', color: PROD_COLORS[prod % 5], dash: true, dots: true, values: [{ x: lastM.q, y: lastM.products[prod].demand }, { x: j.now, y: pr.now[prod] }, { x: j.now + 1, y: pr.next[prod] }] }] : []);
   const cell = (o) => !o || (o.price == null && o.sold == null) ? '<span class="muted">·</span>' : o.price == null && !o.sold ? '<span class="muted">не продавал</span>' : `${o.price != null ? fmtInt(o.price) : '—'} / ${o.quality != null ? o.quality : '·'} / ${o.sold != null ? fmtInt(o.sold) : '—'}`;
-  const rows = j.market.map(m => { const me = j.mine.find(x => x.q === m.q), mp = me ? me.products[prod] : null, x = m.products[prod];
+  const rows = j.market.slice(-20).map(m => { const me = j.mine.find(x => x.q === m.q), mp = me ? me.products[prod] : null, x = m.products[prod];
     return `<tr><td>${m.q}</td><td>${fmtInt(x.demand)}</td><td>${fmtInt(x.sold)}</td><td>${x.avgPrice ? fmtInt(x.avgPrice) : '—'}</td><td>${x.sellers}</td><td>${mp && mp.offered > 0 ? cell(mp) : '<span class="muted">·</span>'}</td><td>${mp && mp.offered > 0 ? fmtInt(mp.lost) : ''}</td>${others.map(r => `<td>${cell(r.products[prod][m.q])}</td>`).join('')}</tr>`; }).join('');
   const anyRival = others.some(r => Object.keys(r.products[prod]).length);
   return jPills(j, prod) + (j.played ? jCard(`Цены: «${esc(p.name)}»`, chartSvg(prices, { fit: true, tight: true, xmin: 1, xmax: jXmax(j), fmt: (y) => fmtInt(y), title: 'Цены' }), (anyRival ? 'Точки соперников — кварталы, за которые у вас есть данные: исследование показывает цены прошлого квартала, досье — тоже.' : 'Цен соперников пока нет: они появляются из исследования и досье, за квартал до покупки.') + ' Средняя рынка бесплатна и есть всегда.')
     + jCard(`Кто сколько продал: «${esc(p.name)}», шт.`, chartSvg(sold, { fit: true, xmin: 1, xmax: jXmax(j), fmt: (y) => fmtInt(y), title: 'Продажи' }) || '<p class="muted small" style="margin:0">Этот товар вы не продавали, а данных о соперниках нет.</p>')
     + jCard(`Рынок товара: «${esc(p.name)}», шт.`, chartSvg(mk, { fit: true, xmin: 1, xmax: jXmax(j, 2), fmt: (y) => fmtInt(y), title: 'Рынок товара' }), 'Разрыв между спросом и продажами — покупатели, ушедшие ни с чем.')
-    + jCard('Цифры по кварталам', `<div class="tbl-wrap"><table><tr><th>Кв.</th><th>Спрос</th><th>Продано</th><th>Ср. цена</th><th>Прод.</th><th>${dot(t)}Вы</th><th>Упущено</th>${others.map(r => `<th>${dot(r)}${esc(r.name)}</th>`).join('')}</tr>${rows}</table></div>`, 'У вас и соперников: цена / класс сырья / продано. Точка — данных за этот квартал нет.')
+    + jCard('Цифры по кварталам', `<div class="tbl-wrap"><table><tr><th>Кв.</th><th>Спрос</th><th>Продано</th><th>Ср. цена</th><th>Прод.</th><th>${dot(t)}Вы</th><th>Упущено</th>${others.map(r => `<th>${dot(r)}${esc(r.name)}</th>`).join('')}</tr>${rows}</table></div>`, (j.market.length > 20 ? 'Последние 20 кварталов. ' : '') + 'У вас и соперников: цена / класс сырья / продано. Точка — данных за этот квартал нет.')
     : `<div class="jcard"><p class="muted small" style="margin:0">Графики по товару появятся после первого квартала.</p></div>`);
 }
 function journalRivals(st, j, prod, t) {
-  const all = [{ id: t.id, name: 'Вы', board: j.mine.map(m => ({ q: m.q, machines: m.machines, arriving: m.arriving })) }].concat(j.rivals), mmax = Math.max(1, ...all.flatMap(r => r.board.map(b => b.machines)));
-  const mach = `<div class="tbl-wrap"><table class="heat"><tr><th style="text-align:left">Предприятие</th>${j.market.map(m => `<th>${m.q}</th>`).join('')}</tr>${all.map(r => `<tr><td style="text-align:left">${dot(r)}${esc(r.name)}</td>${j.market.map(m => { const b = r.board.find(x => x.q === m.q); return b ? `<td style="background:rgba(90,169,255,${(b.machines / mmax * 0.55).toFixed(2)})">${b.machines}${b.arriving ? `<span class="s">+${b.arriving} в пути</span>` : ''}</td>` : '<td class="muted">—</td>'; }).join('')}</tr>`).join('')}</table></div>`;
-  const lastY = j.years[j.years.length - 1], ymax = Math.max(1, ...j.years.flatMap(y => y.values.map(v => v.value || 0)));
-  const rating = lastY ? `<div class="tbl-wrap"><table><tr><th style="text-align:left">Предприятие</th>${j.years.map(y => `<th>Год ${y.year}</th>`).join('')}</tr>${lastY.values.slice().sort((a, b) => (b.value || -1e18) - (a.value || -1e18)).map(v => `<tr><td style="text-align:left">${dot(v)}${esc(v.id === t.id ? 'Вы' : v.name)}</td>${j.years.map(y => { const x = y.values.find(z => z.id === v.id), val = x ? x.value : null; return `<td>${val != null ? fmtMoney(val) + `<div class="bar"><i style="width:${Math.max(0, Math.round(val / ymax * 100))}%;background:${teamColor(v)}"></i></div>` : '—'}</td>`; }).join('')}</tr>`).join('')}</table></div>` : '';
-  const cards = j.rivals.map(r => { const tm = st.teams.find(x => x.id === r.id), ds = r.dossiers, d = ds[ds.length - 1];
+  const all = [{ id: t.id, name: 'Вы', board: j.mine.map(m => ({ q: m.q, machines: m.machines, arriving: m.arriving })) }].concat(j.rivals).filter(r => r.board.some(b => b.q > j.played - 12)), mmax = Math.max(1, ...all.flatMap(r => r.board.map(b => b.machines)));
+  const mk12 = j.market.slice(-12), yrs = j.years.slice(-6);
+  const mach = `<div class="tbl-wrap"><table class="heat"><tr><th style="text-align:left">Предприятие</th>${mk12.map(m => `<th>${m.q}</th>`).join('')}</tr>${all.map(r => `<tr><td style="text-align:left">${dot(r)}${esc(r.name)}</td>${mk12.map(m => { const b = r.board.find(x => x.q === m.q); return b ? `<td style="background:rgba(90,169,255,${(b.machines / mmax * 0.55).toFixed(2)})">${b.machines}${b.arriving ? `<span class="s">+${b.arriving} в пути</span>` : ''}</td>` : '<td class="muted">—</td>'; }).join('')}</tr>`).join('')}</table></div>`;
+  const lastY = j.years[j.years.length - 1], ymax = Math.max(1, ...yrs.flatMap(y => y.values.map(v => v.value || 0)));
+  const rating = lastY ? `<div class="tbl-wrap"><table><tr><th style="text-align:left">Предприятие</th>${yrs.map(y => `<th>Год ${y.year}</th>`).join('')}</tr>${lastY.values.filter(v => yrs.some(y => (y.values.find(z => z.id === v.id) || {}).value != null)).sort((a, b) => (b.value || -1e18) - (a.value || -1e18)).map(v => `<tr><td style="text-align:left">${dot(v)}${esc(v.id === t.id ? 'Вы' : v.name)}</td>${yrs.map(y => { const x = y.values.find(z => z.id === v.id), val = x ? x.value : null; return `<td>${val != null ? fmtMoney(val) + `<div class="bar"><i style="width:${Math.max(0, Math.round(val / ymax * 100))}%;background:${teamColor(v)}"></i></div>` : '—'}</td>`; }).join('')}</tr>`).join('')}</table></div>` : '';
+  const cardOf = (r) => { const tm = st.teams.find(x => x.id === r.id), ds = r.dossiers, d = ds[ds.length - 1];
     const lastQ = Math.max(0, ...j.products.map((p, i) => Math.max(0, ...Object.keys(r.products[i]).map(Number))));
     const load = d && d.creditLimit > 0 ? d.debt / d.creditLimit : 0;
     return `<div class="jcard"><div class="flex between"><h3 style="margin:0">${dot(r)}${esc(r.name)} ${statusPill(tm)}</h3><span class="muted small">на доске: станков ${r.machinesNow}${r.arrivingNow ? ' (+' + r.arrivingNow + ' в пути)' : ''} · рабочих ${r.workersNow}</span></div>
@@ -2525,7 +2622,8 @@ function journalRivals(st, j, prod, t) {
       <div class="hint">Метка — ${Math.round(st.consts.distressDebtRatio * 100)} % лимита: выше неё предприятие считается «в беде». ${d.buyable ? (d.leader ? `Лидер рейтинга: продаётся только за тройную цену — <b>${fmtInt(d.askRange[0])}</b>; долг перейдёт к покупателю.` : `Оценка юристов: владельцы согласятся примерно за <b>${fmtMoney(d.askRange[0])} – ${fmtMoney(d.askRange[1])}</b>; долг перейдёт к покупателю.`) : 'Купить нельзя: ' + esc(d.notBuyable) + '.'} Досье куплено в кв. ${d.bought}, в нём итоги кв. ${d.about}.</div>
       ${ds.length > 1 ? chartSvg([{ name: 'Деньги', color: '#3ecf8e', dots: true, values: ds.map(x => ({ x: x.about, y: x.cash })) }, { name: 'Долг', color: '#ff5c6c', dots: true, values: ds.map(x => ({ x: x.about, y: x.debt })) }, { name: 'Лимит', color: '#8f9bb3', dash: true, values: ds.map(x => ({ x: x.about, y: x.creditLimit })) }], { fit: true, xmin: 1, xmax: jXmax(j), fmt: (y) => fmtMoney(y), title: 'Деньги и долг' }) : ''}
       <details ${ds.length > 1 ? '' : 'open'}><summary>Все досье: ${ds.length}</summary><div class="tbl-wrap"><table><tr><th>Итоги кв.</th><th>Состояние</th><th>Деньги</th><th>Долг</th><th>Лимит</th><th>Прибыль</th><th>Станки</th><th>Рабочие</th><th>Юристы</th></tr>${ds.map(x => `<tr><td>${x.about}</td><td><span class="pill ${STATE_PILL[x.state] || ''}">${esc(x.stateText)}</span></td><td>${fmtMoney(x.cash)}</td><td>${fmtMoney(x.debt)}</td><td>${fmtMoney(x.creditLimit)}</td><td>${signed(x.profit)}</td><td>${x.machines}</td><td>${x.workers}</td><td>${x.buyable ? (x.leader ? fmtMoney(x.askRange[0]) + ' (лидер, ×3)' : fmtMoney(x.askRange[0]) + ' – ' + fmtMoney(x.askRange[1])) : '—'}</td></tr>`).join('')}</table></div></details>` : `<p class="muted small" style="margin:8px 0 0">${st.settings.hard ? 'Досье на него вы не покупали.' : 'Досье бывает только в сложном режиме.'}</p>`}
-    ${lastQ ? `<div class="small" style="margin-top:8px"><span class="muted">Последние известные цены, кв. ${lastQ} (цена / класс / продано):</span> ${j.products.map((p, i) => { const o = r.products[i][lastQ]; return o && o.price != null ? esc(p.key) + ' ' + fmtInt(o.price) + ' / ' + (o.quality != null ? o.quality : '·') + ' / ' + fmtInt(o.sold) : ''; }).filter(Boolean).join(' · ') || 'не продавал'}. По кварталам — вкладка «Товар».</div>` : ''}</div>`; }).join('');
+    ${lastQ ? `<div class="small" style="margin-top:8px"><span class="muted">Последние известные цены, кв. ${lastQ} (цена / класс / продано):</span> ${j.products.map((p, i) => { const o = r.products[i][lastQ]; return o && o.price != null ? esc(p.key) + ' ' + fmtInt(o.price) + ' / ' + (o.quality != null ? o.quality : '·') + ' / ' + fmtInt(o.sold) : ''; }).filter(Boolean).join(' · ') || 'не продавал'}. По кварталам — вкладка «Товар».</div>` : ''}</div>`; };
+  const goneR = j.rivals.filter(r => r.status !== 'active'), cards = j.rivals.filter(r => r.status === 'active').map(cardOf).join('') + (goneR.length > 2 ? `<details><summary>Выбывшие соперники: ${goneR.length}</summary>${goneR.map(cardOf).join('')}</details>` : goneR.map(cardOf).join(''));
   return (j.played ? jCard('Станки на конец квартала', mach, 'Это видно всем на доске. Кто резко наращивает станки — идёт в объём: ждите давления на цены через квартал-два. Прочерк — предприятие выбыло или куплено.') : '')
     + (rating ? jCard('Годовой рейтинг: стоимость предприятий', rating, 'Публикуется раз в год. Полоса — доля от лучшего результата за все годы.') : '')
     + cards;
@@ -2576,7 +2674,8 @@ function screenFinal() {
 function screenDebrief() {
   const st = App.state, id = App.view.teamId, t = st.teams.find(x => x.id === id);
   if (!st.finished || !t) return screenFinal();
-  if (!App.debriefCache || App.debriefCache.key !== st.createdAt + '|' + id) { try { App.debriefCache = { key: st.createdAt + '|' + id, db: Coach.debrief(st, id) }; } catch (e) { console.error(e); App.debriefCache = { key: st.createdAt + '|' + id, db: null, err: e.message }; } }
+  const dKey = st.createdAt + '|' + id + '|' + (App.view.from || '');
+  if (!App.debriefCache || App.debriefCache.key !== dKey) { try { App.debriefCache = { key: dKey, db: Coach.debrief(st, id, App.view.from ? { from: App.view.from } : undefined) }; } catch (e) { console.error(e); App.debriefCache = { key: dKey, db: null, err: e.message }; } }
   const db = App.debriefCache.db, back = topbar('<button class="btn-ghost btn-sm" data-action="final">← К итогам</button>');
   if (!db) return back + `<h2>Разбор партии</h2><div class="warn-box">Не удалось посчитать разбор: ${esc(App.debriefCache.err || '')}</div>`;
   const item = (x, good) => `<div class="db-item"><span class="pill ${good ? 'ok' : 'bad'}">кв. ${x.q}</span> <span class="sum ${good ? 'pos' : 'neg'}">${good ? '+' : '−'}${fmtMoney(x.sum)}</span> ${x.long ? '<span class="pill">до конца партии</span>' : ''}${x.hindsight ? '<span class="pill">задним числом</span>' : ''}<br>${esc(x.text)}</div>`;
@@ -2584,6 +2683,7 @@ function screenDebrief() {
   return back + `<h2>Разбор партии — ${dot(t)}${esc(t.name)}</h2>
   <div class="card"><div class="kpis"><div class="kpi"><span class="v">${db.place} из ${db.of}</span><span class="l">Место</span></div><div class="kpi"><span class="v">${fmtMoney(db.value)}</span><span class="l">Стоимость</span></div>${db.winner.id !== id ? `<div class="kpi"><span class="v">${fmtMoney(db.winner.value)}</span><span class="l">Победитель: ${esc(db.winner.name)}</span></div>` : ''}</div>
     <p class="muted small" style="margin-top:10px">Вы: ${bd(db.breakdown)}${db.winner.id !== id && db.winner.breakdown ? '<br>Победитель: ' + bd(db.winner.breakdown) : ''}</p>
+    ${db.window ? `<div class="jpills" style="margin:10px 0">${Array.from({ length: Math.ceil(db.played / db.window.size) }, (x, k) => { const f = Math.min(k * db.window.size + 1, Math.max(1, db.played - db.window.size + 1)); return `<button class="${f === db.window.from ? 'on' : ''}" data-action="debriefFrom" data-from="${f}" data-id="${id}">Годы ${Math.ceil(f / 4)}–${Math.ceil((f + db.window.size - 1) / 4)}</button>`; }).join('')}</div><p class="muted small">Партия длинная: разбор идёт окнами по 5 лет, сейчас — кварталы ${db.window.from}–${db.window.to}. Крупные решения (станки, кредит, покупка) сравниваются по итогу всей партии.</p>` : ''}
     ${db.ok ? `<p class="muted small">Каждая сумма — разница двух расчётов движка: как было и как было бы с другим решением при тех же соперниках. По кварталу сравнивается стоимость предприятия сразу после квартала; пометка «до конца партии» — сравнивается итог партии. Посчитано за ${(db.ms / 1000).toFixed(1).replace('.', ',')} с, расчётов кварталов: ${fmtInt(db.runs)}.</p>` : `<div class="warn-box">${esc(db.reason || '')}</div>`}</div>
   ${db.ok ? `<div class="grid grid-2" style="margin-top:14px">
     <div class="card"><h3>Решения, которые принесли успех</h3>${db.good.length ? db.good.map(x => item(x, true)).join('') : '<p class="muted small">Заметных не найдено: ни одно решение не выделилось на фоне проверенных вариантов.</p>'}</div>
@@ -2633,7 +2733,8 @@ function rulesShort() {
   <h3>Рынок</h3><ul><li>Покупатели выбирают по цене, качеству, рекламе и репутации; у каждого товара свой характер: «Массовый» и «Эконом» смотрят на цену, «Премиум» и «Новинка» — на качество и рекламу.</li><li>Цена выше 2,5 справочных — покупателей нет. Если ваш товар кончился, спрос уходит к конкурентам.</li><li>Рынок растёт, потом кризис (спрос падает на треть, «Эконом» растёт, «Премиум» проваливается), потом восстановление. Новости — направление на следующий квартал; точный прогноз — в купленном исследовании.</li></ul>
   <h3>Реклама</h3><ul><li>Действует только в своём квартале и только на свой товар. Поднимает вашу привлекательность, а значит и долю покупателей. Сильнее всего в «Новинке» и «Премиуме», слабее всего в «Массовом» и «Экономе» — там решает цена.</li><li>Каждый следующий рубль работает слабее предыдущего. Реклама нужна, когда без неё останется непроданный товар; если товар и так разбирают — поднимайте цену, а не рекламу.</li><li>Реклама от ${fmtMoney(c.brandAdsRef)} за квартал немного помогает репутации; главный строитель репутации — качество.</li></ul>
   <h3>Сложный режим</h3><ul><li>«Загадка»: игра сама назначает соперников — уровень, манеру и характер. Их деньги и отчёты скрыты до финала; рейтинг раз в год. Соперники играют по тем же правилам и за те же деньги.</li><li>Случайный рынок: кризис приходит когда угодно, бывает резким, затяжным, двойным или не приходит вовсе. Плашка на доске показывает итог прошлого квартала. Новости ошибаются примерно в каждом четвёртом прогнозе; исследование даёт точный прогноз на следующий квартал.</li><li>События на 2–4 квартала (мода, импорт, госзаказ, сырьё, ставка, зарплаты), иногда со слухом заранее; слух может оказаться пустым. Ставка банка плавает от 3 до 7 %.</li><li>Лента рынка даёт сигналы без имён; досье на соперника — ${fmtMoney(c.dossierCost)}.</li></ul>
-  <h3>Выдавить и купить (сложный режим)</h3><ul><li>Состояния соперника: здоров → под давлением (два убыточных квартала подряд) → в беде (принудительный кредит или долг выше 80 % лимита) → на грани (принудительный кредит два квартала подряд или распродажа активов).</li><li>Предложение о покупке: одно в квартал, юристам ${fmtMoney(c.offerFee)} даже при отказе. Владельцы согласны на цену не ниже «осязаемая стоимость × коэффициент»: здоров 1,6 · под давлением 1,25 · в беде 0,9 · на грани 0,7; минимум ${fmtMoney(c.askMin)}. Лидер годового рейтинга не продаётся. Отказ приходит с намёком: «даже не обсуждаем» или «близко».</li><li>Слияние: к покупателю переходят станки (работают со следующего квартала), люди, склад, деньги и долг. Купленный уходит с рынка, его итог — цена продажи. Банк не одобрит сделку, если общий долг выше общего лимита.</li><li>«В беде» три квартала подряд или «на грани» — владельцы сами ищут покупателя, об этом пишут в ленте. За добычу спорят и сильные соперники: выигрывает большая цена.</li><li>Станки банкротов и распроданные за долги станки банк продаёт в следующем квартале лотом: минимум ${fmtMoney(c.machinePrice * c.lotMinRatio)} за штуку, выигрывает высшая цена.</li><li>Не осталось действующих соперников — «рынок захвачен», партия заканчивается досрочно.</li></ul>
+  <h3>Длинная партия (до 30 лет)</h3><ul><li>10, 15, 20, 25 или 30 лет; всегда сложный режим и случайный рынок. Рынок идёт циклами: кризис → восстановление → 2,5–4,5 года роста, иногда бум. За 30 лет — 5–7 кризисов, рынок вырастает в 2–4,5 раза.</li><li>Первые пять лет товары растут как в короткой партии, потом у каждого товара раз в пять лет новый медленный тренд — вверх или вниз.</li><li>Соперник ушёл (банкрот или куплен) — через ${c.entrantDelay} кварталов на его место приходит новый: станков и денег у него половина от среднего по действующим. Пока новый в пути, партия досрочно не кончается.</li><li>Разбор партии — пятилетками. В отчёте для Claude ваши кварталы целиком, соперники — по годам.</li></ul>
+  <h3>Выдавить и купить (сложный режим)</h3><ul><li>Состояния соперника: здоров → под давлением (два убыточных квартала подряд) → в беде (принудительный кредит или долг выше 80 % лимита) → на грани (принудительный кредит два квартала подряд или распродажа активов).</li><li>Предложение о покупке: одно в квартал, юристам ${fmtMoney(c.offerFee)} даже при отказе. Владельцы согласны на цену не ниже «осязаемая стоимость × коэффициент»: здоров 1,6 · под давлением 1,25 · в беде 0,9 · на грани 0,7; минимум ${fmtMoney(c.askMin)}. Лидер годового рейтинга продаётся только за тройную цену — 3 × осязаемая стоимость, без торга; сумма в досье. Остальным отказ приходит с намёком: «даже не обсуждаем» или «близко».</li><li>Слияние: к покупателю переходят станки (работают со следующего квартала), люди, склад, деньги и долг. Купленный уходит с рынка, его итог — цена продажи. Банк не одобрит сделку, если общий долг выше общего лимита.</li><li>«В беде» три квартала подряд или «на грани» — владельцы сами ищут покупателя, об этом пишут в ленте. За добычу спорят и сильные соперники: выигрывает большая цена.</li><li>Станки банкротов и распроданные за долги станки банк продаёт в следующем квартале лотом: минимум ${fmtMoney(c.machinePrice * c.lotMinRatio)} за штуку, выигрывает высшая цена.</li><li>Не осталось действующих соперников — «рынок захвачен», партия заканчивается досрочно.</li></ul>
   <h3>Банк</h3><ul><li>Ставка ${c.rateNormal * 100} %/кв., в кризис ${c.rateCrisis * 100} %. Лимит ${fmtMoney(c.limitBase)} + половина стоимости станков (в кризис × ${c.limitCrisisMult}); ведущий-банк может изменить лимит после защиты плана.</li><li>Денег меньше нуля: принудительный кредит по полуторной ставке в пределах лимита, иначе распродажа склада (50 %) и станков (50 %). Если после распродажи долг больше активов — банкротство, предприятие выбывает.</li></ul>
   <h3>Сделки</h3><ul><li>Станки можно продавать друг другу по договорной цене (записывает ведущий).</li><li>Режим Макс: займы между командами и покупка предприятий — купленное становится дочерним, его стоимость входит в стоимость покупателя; продавшая команда фиксирует результат = цена сделки.</li></ul>
   <h3>Советы старой школы</h3><ul><li>Не зависай посередине: либо дёшево и много, либо дорого и качественно.</li><li>Считай постоянные расходы: станок с рабочими стоит ${fmtInt(c.machineMaint + 4 * c.wage)} в квартал, даже если стоит.</li><li>Перед кризисом — сокращай запасы и долг; в кризис выигрывает «Эконом».</li></ul></div>`;
@@ -2745,6 +2846,17 @@ function guideHtml() {
   <li><b>Лента рынка</b> — сигналы без имён: ценовая война, новый продавец, уход продавца, нехватка товара, резкая закупка станков, принудительный кредит у кого-то из соперников.</li>
   <li><b>Что работает против сильных.</b> Пока товара на рынке меньше спроса (у вас в отчёте «упущено»), держите цену на 20–30 % выше справочной. Появился остаток — реклама под остаток или цена вниз. Число станков само по себе победы не даёт. Сырьё класса 3 окупается там, где покупатель смотрит на качество: «${esc(P[2].name)}», «${esc(P[4].name)}», «${esc(P[1].name)}».</li>
   <li><b>После партии.</b> В финале — кто есть кто и каким был рынок. Кнопка «Отчёт для разбора» собирает текстовый файл всей партии: принесите его в чат с Claude. «Реванш» — та же партия заново: тот же стол и тот же рынок, чтобы проверить другое решение.</li></ul>
+  <h3>Длинная партия — до 30 лет</h3>
+  <ul><li><b>Как включить.</b> В новой партии выберите «Длинная партия» и срок: 10, 15, 20, 25 или 30 лет. 30 лет — это 120 кварталов. Режим — всегда сложный, рынок — всегда случайный. Короткая партия (2–5 лет) осталась прежней.</li>
+  <li><b>Рынок идёт циклами.</b> Кризис (резкий, обычный, затяжной или двойной) → 2–4 квартала восстановления → 2,5–4,5 года спокойного роста, в половине циклов ещё и короткий бум. За 30 лет кризисов 5–7, рынок вне кризисов вырастает в 2–4,5 раза. Вывод тот же, что в жизни: кризис придёт обязательно, и не один. К нему подходят без долга у потолка лимита и с деньгами на скупку.</li>
+  <li><b>Товары меняются.</b> Первые пять лет — как в короткой партии. Дальше у каждого товара раз в пять лет новый медленный тренд, вверх или вниз. «${esc(P[4].name)}» за партию может вырасти в несколько раз, а может и сжаться. Раз в несколько лет пересматривайте, на что работают станки: во вкладке «Рынок» журнала разведки есть график спроса за всю партию.</li>
+  <li><b>События</b> — 1–3 на пятилетку. Рост зарплат остаётся навсегда, но бывает не больше двух раз за партию.</li>
+  <li><b>Новые соперники.</b> Соперник разорился или его купили — через ${c.entrantDelay} кварталов (полтора года) на его место приходит новый. Станков и денег у него — половина от среднего по действующим предприятиям, уровень — из тех, что были за столом с начала. В ленте появится новость, на доске — новая строка. Если на рынке уже четыре предприятия или соперник ушёл меньше чем за 9 кварталов до конца партии, новый не приходит.</li>
+  <li><b>«Рынок захвачен» — позже.</b> Остались одни, но новый соперник уже в пути — партия продолжается. Полтора года без соперников — время заработать и подготовиться.</li>
+  <li><b>Покупка соперников</b> работает как в короткой партии: слабого — за 0,7–1,6 осязаемой стоимости, лидера года — только за тройную. Нового соперника тоже можно выдавить и купить.</li>
+  <li><b>Разбор и отчёт.</b> Разбор партии считается пятилетками: кнопки «Годы 1–5 … 26–30», по умолчанию — последние пять лет. В отчёте для Claude ваши кварталы записаны целиком, соперники — итогами года, новости и сигналы — за последние пять лет. Отчёт 30-летней партии собирается 4–5 секунд — подождите после нажатия.</li>
+  <li><b>Журнал разведки.</b> Графики — за всю партию, таблицы — за последние три года, чтобы помещались на экран телефона.</li>
+  <li><b>Сохранение.</b> Партия сохраняется сама после каждого квартала; к концу 30 лет это около 1,4 МБ. Если браузеру не хватит места, игра покажет жёлтое предупреждение — тогда сохраните партию в файл через «Меню». Играть можно частями, хоть по году в день.</li></ul>
   <h3>Как выдавить и купить конкурента</h3>
   <ol><li><b>Найдите жертву.</b> Сигнал в ленте («банк выдал принудительный кредит», «распродаёт активы») или объявление «владельцы ищут покупателя» → купите досье (${fmtMoney(c.dossierCost)}). В нём состояние соперника, долг, главный товар и оценка юристов: за сколько согласятся владельцы. Лучшая жертва — с долгом у потолка лимита и одним главным товаром. Проще всего найти её на столах «Нормальный» и «Тяжёлый»; на «Жёстком» слабых почти нет.</li>
   <li><b>Бейте в главный товар.</b> Цена на 8–12 % ниже её цены, качество не хуже, объём такой, чтобы хватило и её покупателям. Кончится ваш товар — 70 % неудовлетворённых уйдут обратно к ней.</li>
@@ -2755,7 +2867,7 @@ function guideHtml() {
   <li><b>Лидер — только за тройную цену.</b> Лидера годового рейтинга владельцы продают в любом состоянии, но втрое дороже: 3 × (деньги − долг + станки по ${fmtMoney(c.machinePrice * c.machineBookRatio)} + склад), без торга и без «близко». Точная сумма — в досье на лидера. Это дорого: вы платите три цены за одно имущество, поэтому стоимость вашего предприятия сразу после сделки падает. Имеет смысл, когда денег много, а лидер уходит в отрыв; слабого соперника всегда выгоднее выдавить и взять за 0,7–0,9.</li>
   <li><b>Или ждите банкротства</b> и берите станки у банка: от ${fmtMoney(c.machinePrice * c.lotMinRatio)} за штуку, но без людей и склада, через квартал ожидания — и сильный соперник может перебить цену.</li>
   <li><b>Когда не лезть:</b> у самого долги; рынок растёт и жертва выплывет сама; её товар вам невыгоден; до конца партии меньше года — покупка не успеет окупиться.</li></ol>
-  <p>Соперники охотятся тоже: сильнейшие из школ «Масштабист» и «Кризисный охотник» покупают досье и делают предложения по тем же правилам. Вас купить нельзя. Остались на рынке одни — «рынок захвачен», партия заканчивается досрочно. В финале кнопка «Разбор партии» покажет, сколько принесла покупка и кого из слабых соперников вы упустили.</p>
+  <p>Соперники охотятся тоже: сильнейшие из школ «Масштабист» и «Кризисный охотник» покупают досье и делают предложения по тем же правилам. Вас купить нельзя. Остались на рынке одни — «рынок захвачен», партия заканчивается досрочно (в длинной партии — только если новый соперник уже не придёт). В финале кнопка «Разбор партии» покажет, сколько принесла покупка и кого из слабых соперников вы упустили.</p>
   <h3>Банк</h3>
   <ul><li>Кредит зачисляется сразу, проценты (${c.rateNormal * 100} % в квартал, в кризис ${c.rateCrisis * 100} %) снимаются при закрытии квартала.</li>
   <li>Если «Деньги после закупок» в минусе, банк сам выдаст кредит на недостачу по полуторной ставке — лучше взять обычный заранее.</li>
@@ -2820,7 +2932,7 @@ const actions = {
         const humans = d.humans.map((h, i) => ({ name: (h.name || '').trim() || 'Предприятие ' + (i + 1), kind: 'human', pin: (h.pin || '').trim() }));
         if (humans.length + (+d.rivals || 0) > 4 || !PRESET_RIVALS[preset ? d.preset : 'level1'].includes(+d.rivals)) throw new Error('За столом не больше 4 предприятий. Уберите команду или уменьшите число соперников.');
         opts.seed = seed; opts.teams = humans.concat(E.generateTable(preset ? { seed, preset: d.preset, rivals: +d.rivals } : { seed, strength: d.strength, rivals: +d.rivals }));
-        opts.tableInfo = preset ? 'Готовый состав · ' + PRESETS[d.preset] : 'Загадка · ' + STRENGTHS[d.strength];
+        opts.tableInfo = (preset ? 'Готовый состав · ' + PRESETS[d.preset] : 'Загадка · ' + STRENGTHS[d.strength]) + (d.game === 'long' ? ' · длинная партия' : '');
       }
       App.state = E.createGame(opts); App.go('board'); App.toast('Партия началась. Удачи!');
     } catch (e) { alert(e.message); }
@@ -2845,6 +2957,7 @@ const actions = {
   results() { App.go('results'); },
   final() { App.go('final'); },
   debrief(ds) { App.toast('Считаю разбор: переигрываю партию…'); setTimeout(() => App.go('debrief', { teamId: +ds.id }), 30); },
+  debriefFrom(ds) { App.toast('Считаю разбор за эти годы…'); setTimeout(() => App.go('debrief', { teamId: +ds.id, from: +ds.from }), 30); },
   deals() { App.go('deals'); },
   menu() { App.view.prev = App.view.screen; App.go('menu', { prev: App.view.prev, debrief: App.view.debrief }); },
   back() { App.go(App.view.prev && App.view.prev !== 'menu' ? App.view.prev : 'board', { debrief: App.view.debrief }); },
