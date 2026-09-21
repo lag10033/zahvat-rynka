@@ -2668,7 +2668,7 @@ function screenFinal() {
   ${revealBots ? `<div class="card accent" style="margin-top:14px"><h3>Карты раскрыты: кто играл против вас</h3>${st.tableInfo ? `<p class="muted small">${esc(st.tableInfo)}${st.rematchOf ? ' · реванш' : ''}</p>` : ''}${revealBots}</div>` : ''}
   ${marketReveal}
   <div class="card" style="margin-top:14px"><h3>Все цифры по кварталам</h3><p class="muted small">Полные данные всех предприятий — для обсуждения после игры.</p>${debrief}</div>
-  <div class="card accent" style="margin-top:14px"><h3>Отчёт для разбора с Claude</h3><p class="muted small">Текстовый файл со всей партией: настройки, раскрытые соперники, рынок, решения и итоги всех команд по кварталам. Принесите его в чат — разберём, какие решения дали успех, где ошибки и что сделали соперники. PIN-коды в файл не попадают.</p>
+  <div class="card accent" style="margin-top:14px"><h3>Отчёт для разбора с Claude</h3><p class="muted small">Текстовый файл со всей партией: настройки, раскрытые соперники, рынок, решения и итоги всех команд по кварталам. Принесите его в чат — разберём, какие решения дали успех, где ошибки и что сделали соперники. PIN-коды в файл не попадают.${st.settings.long ? ' <b>Партия длинная: отчёт собирается около 10 секунд на телефоне — нажмите один раз и подождите.</b>' : ''}</p>
     <div class="actions" style="margin-top:0"><button class="btn-primary" data-action="copyReport">Скопировать отчёт</button><button data-action="shareReport">Поделиться / сохранить файл</button></div></div>
   <div class="actions">${st.setup ? '<button class="btn-primary" data-action="rematch">Реванш: тот же стол и рынок</button>' : ''}<button class="${st.setup ? '' : 'btn-primary'}" data-action="new">Новая партия</button><button data-action="export">Сохранить партию в файл</button></div>`;
 }
@@ -2943,13 +2943,18 @@ const actions = {
     if (!confirm('Реванш: тот же стол соперников и тот же рынок, всё с начала. Эта партия будет заменена — отчёт лучше сохранить заранее. Начать?')) return;
     try { App.state = E.createGame(o); App.go('board'); App.toast('Реванш начался: стол и рынок те же'); } catch (e) { alert(e.message); }
   },
+  reportText() { // в длинной партии сборка занимает секунды — считаем один раз на партию
+    const st = App.state, key = st.createdAt + '|' + st.quarter + '|' + (st.finished ? 'f' : '');
+    if (!App.reportCache || App.reportCache.key !== key) App.reportCache = { key, text: Coach.exportText(st) };
+    return App.reportCache.text;
+  },
   copyReport() {
-    const text = Coach.exportText(App.state), okMsg = 'Отчёт скопирован — вставьте его в чат с Claude';
+    const text = actions.reportText(), okMsg = 'Отчёт скопирован — вставьте его в чат с Claude';
     const viaArea = () => { const ta = document.createElement('textarea'); ta.value = text; ta.setAttribute('readonly', ''); ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0'; document.body.appendChild(ta); ta.select(); ta.setSelectionRange(0, text.length); let ok = false; try { ok = document.execCommand('copy'); } catch (e) {} ta.remove(); App.toast(ok ? okMsg : 'Скопировать не вышло — нажмите «Поделиться / сохранить файл»'); };
     if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(() => App.toast(okMsg), viaArea); else viaArea();
   },
   shareReport() {
-    const text = Coach.exportText(App.state), name = Coach.fileName(App.state);
+    const text = actions.reportText(), name = Coach.fileName(App.state);
     try { const file = new File([text], name, { type: 'text/plain' }); if (navigator.canShare && navigator.canShare({ files: [file] })) { navigator.share({ files: [file], title: 'Захват рынка — отчёт партии' }).catch(() => {}); return; } } catch (e) {}
     const blob = new Blob([text], { type: 'text/plain;charset=utf-8' }), a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500);
     App.toast('Файл отчёта сохранён: ' + name);
