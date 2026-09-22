@@ -22,6 +22,7 @@ a{color:var(--blue)}
 .seg button.on{background:var(--card2);color:var(--text);box-shadow:0 2px 10px rgba(0,0,0,.25)}
 .seg button i{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:7px;vertical-align:1px}
 .cols{display:grid;grid-template-columns:1fr;gap:14px;margin-top:14px}
+.cols>*{min-width:0}                         /* иначе широкая таблица скана растягивает колонку и страница ездит вбок */
 @media(min-width:960px){.cols{grid-template-columns:minmax(360px,440px) 1fr;align-items:start}.cols>.col{position:sticky;top:120px;max-height:calc(100vh - 130px);overflow:auto;padding-right:4px}.cols>.col.free{position:static;max-height:none;overflow:visible}}
 .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:14px;margin-bottom:12px}
 .card h2{margin-bottom:8px}
@@ -1488,12 +1489,12 @@ const PRODUCTS = [
 const LETTERS = { a:'A', 'а':'A', b:'B', 'в':'B', c:'C', 'с':'C', d:'D', e:'E', 'е':'E' };
 // заголовок столбца → поле; порядок важен: «средняя цена» и «отказы (цена)» раньше «цена», «продавцов» раньше «продано»
 const HEADERS = [
-  ['avgPrice', /средн|^ср\./], ['refused', /отказ/], ['lost', /упущ|дефицит/], ['invEnd', /остат/], ['sellers', /продавц|^прод\.$/],
-  ['sold', /продан/], ['demand', /спрос/], ['forecast', /прогноз|ориентир/], ['quality', /класс|качеств/], ['ads', /реклам/],
+  ['avgPrice', /средн[а-я]*\s*цен|^ср\.?\s*цен/], ['refused', /отказ/], ['lost', /упущ|дефицит/], ['invEnd', /остат/], ['sellers', /продавц|^прод\.$/],
+  ['sold', /продан|продаж/], ['demand', /спрос/], ['forecast', /прогноз|ориентир/], ['quality', /класс|качеств/], ['ads', /реклам/],
   ['produced', /произв|выпуск/], ['revenue', /выруч/], ['price', /(^|[^а-я])цен[аы]?($|[^а-я])/],
 ];
 // двусловные заголовки игры (заголовок без явных разделителей делим по словам)
-const BIGRAMS = [[/^средн/, /^цен/], [/^ср\.?$/, /^цен/], [/^продано$/, /^всего$/], [/^ко$/, /^мне$/], [/^след/, /^кв/]];
+const BIGRAMS = [[/^средн/, /^цен/, 'цена'], [/^ср\.?$/, /^цен/, 'цена'], [/^продано$/, /^всего$/, 'всего'], [/^ко$/, /^мне$/], [/^след/, /^кв/]];
 const UNITS = { '₽':1, 'р':1, 'р.':1, 'руб':1, 'руб.':1, '%':1, 'шт':1, 'шт.':1, 'ед':1, 'ед.':1, 'тыс':1e3, 'тыс.':1e3, 'млн':1e6, 'млн.':1e6, 'млрд':1e9, 'млрд.':1e9 };
 const UNIT_RE = /^(₽|р\.?|руб\.?|%|шт\.?|ед\.?|тыс\.?|млн\.?|млрд\.?)$/;
 // числовое слово (в нижнем регистре): знак, цифры с ошибками OCR (о/o→0, з→3, l/i→1, б→6) и разделителями, единица
@@ -1504,21 +1505,27 @@ const COEF_RE = /^×|^x(?=[0-9])/;                                     // «×1,
 // разделители ячеек: явные (таб, | ; · • │ ¦ /, точка с пробелами) и мягкий (два и более пробелов)
 const HARD_RE = /[\t|;·•│¦\/]|\s\.\s/;
 const SEP_RE = /\t|\s{2,}|[|;·•│¦\/]|\s\.\s/;
-const SPACES_RE = /[\u00A0\u202F\u2009\u2007\u2008\u205F\u3000]/g;
+const SPACES_RE = /[\u00A0\u202F\u2009\u2007\u2008\u205F\u3000\u200B\u200C\u200D\uFEFF]/g;
 const COMP_RE = /^([^:]{1,40}?)\s*:\s*(.*)$/;                       // «Титан: A 800/2/1200 · B 1 300/2/900»
 // товар — буква или имя (Массовый, Стандарт…), затем цена/класс/продано; разряды — группы по три, хвостовой пробел не съедаем (иначе теряется «B 1 300/2/900» без «·»)
-const COMP_ITEM = /(^|[\s·•;,])([abcdeавсе]|[a-zа-яё]{4,12})\s*([0-9оoзliб]+(?:\s[0-9оoзliб]{3})*)\s*\/\s*([0-9оoзliб]+)\s*\/\s*([0-9оoзliб]+(?:\s[0-9оoзliб]{3})*)/gi;
-const COMP_NAME = /^([^:0-9]{1,40}?)\s*:\s*$/;                       // «Титан:» — имя соперника на отдельной строке
+const COMP_ITEM = /(^|[\s·•;,])([abcdeавсе]|[a-zа-яё]{4,12})\s*([0-9оoзliб]+(?:\s[0-9оoзliб]{3})*)\s*\/\s*([0-9оoзliб]+|[·•—–?])\s*\/\s*([0-9оoзliб]+(?:\s[0-9оoзliб]{3})*)/gi;
+const COMP_NAME = /^([^:]{1,40}?)\s*:\s*$/;                       // «Титан:» — имя соперника на отдельной строке
 const COMP_NONE = /:\s*(не продавал|ещ[её] не торговал)/i;
+const TAIL_LABEL = /(?:^|[\u00B7\u2022;|])\s*([^0-9\u00B7\u2022;|:]{2,24}):\s*$/;   // «… · Премиум:» — число этой подписи ушло на следующую строку
+const ROLE_RE = /^(команда|фирма|компания|предприятие|игрок|участник|соперник|конкурент|бригада|стол|группа|организация|бренд|марка|№)$/;  // «Команда 1» — номер в подписи
 const FN_WORDS = /^(в|во|на|и|по|при|для|от|до|не|о|об|за|с|со|из|у|к|же|бы|ли|это)$/;
 const CTX_FORECAST = /^(спрос|прогноз)/i;                             // подпись блока над строками «Массовый: 7 900 · …» — это прогноз спроса
 const CTX_MINE = /^ориентир/i;                                        // «Ориентир: сколько покупателей придёт к вам» — оценка, не вход
-const LABEL_COL = /^(товар|команда|предприятие|название|наименование|участник|игрок)$/; // заголовок столбца подписей — всё левее него титул
+const LABEL_COL = /^(товар|команда|предприятие|название|наименование|участник|игрок|соперник|конкурент|фирма|компания|организация|продавец|бренд|марка)$/; // заголовок столбца подписей — всё левее него титул
+const MAX_GROUP = 8;                                                  // групп разрядов в одном числе (8 × 3 цифры — заведомо больше любых денег игры)
 const E_MAX = 32;                                                     // столбцов с точным учётом в раскладке
 const B_N = 1.5;                                                      // премия раскладке с числом ячеек, равным числу столбцов таблицы
 
 // ---------- утилиты ----------
 const lower = (s) => String(s).toLowerCase().replace(/ё/g, 'е');
+// похожие латинские буквы в кириллическом слове (Vision путает их в шапке: «Пpодано», «всеro», «цeна»)
+const HOMO = { a:'а', b:'в', c:'с', e:'е', h:'н', k:'к', m:'м', o:'о', p:'р', t:'т', x:'х', y:'у' };
+const deLatin = (s) => /[а-я]/.test(s) ? s.replace(/[abcehkmoptxy]/g, (ch) => HOMO[ch]) : s;
 const fixDigits = (s) => s.replace(/[оo]/g, '0').replace(/з/g, '3').replace(/[li]/g, '1').replace(/б/g, '6');
 function levenshtein(a, b) {
   const m = a.length, n = b.length; let prev = [];
@@ -1587,7 +1594,7 @@ function mergeAll(items) {
     else { const f = cur[0], l = cur[cur.length - 1], d = cur.map(x => x.digits).join('');
       out.push({ kind:'num', digits: d, num: parseInt(d, 10), den: 1, neg: f.neg, mult: l.mult, boundary: l.boundary, unitAfter: l.unitAfter, hard: false, coef: f.coef, lead: false, pure3: false }); }
     cur = []; };
-  items.forEach(it => { if (cur.length && mergeable(cur[cur.length - 1], it)) { cur.push(it); return; } flush(); if (it.kind === 'num') cur.push(it); else out.push(it); });
+  items.forEach(it => { if (cur.length && cur.length < MAX_GROUP && mergeable(cur[cur.length - 1], it)) { cur.push(it); return; } flush(); if (it.kind === 'num') cur.push(it); else out.push(it); });
   flush();
   return out;
 }
@@ -1599,7 +1606,7 @@ function parsePiece(piece, forced) {
   for (let i = 0; i < words.length; i++) {
     let t = classify(words[i], zone);
     // «Новинка ЗОО 0 — 0»: группа цифр из букв перед числами — число, а не часть подписи
-    if (!zone && t.kind === 'text' && OCR_WORD.test(lower(words[i])) && lower(words[i]).length > 1 && i + 1 < words.length && /^(num|dash)$/.test(classify(words[i + 1], true).kind)) t = classify(words[i], true);
+    if (!zone && t.kind === 'text' && OCR_WORD.test(lower(words[i])) && (lower(words[i]).length > 1 || /^[li]$/.test(lower(words[i]))) && i + 1 < words.length && /^(num|dash)$/.test(classify(words[i + 1], true).kind)) t = classify(words[i], true);
     if (!zone) {
       if (t.kind === 'num' || t.kind === 'dash') zone = true; else { if (t.kind === 'skip') coef = coef || !!t.coef; else labelWords.push(words[i]); continue; }
     }
@@ -1611,6 +1618,9 @@ function parsePiece(piece, forced) {
     items.push(t.kind === 'dash' ? { kind:'null' } : t);
   }
   if (forced) items = mergeAll(items);
+  // «Команда 1», «Фирма 7»: слово-роль и малое целое следом — это подпись строки, а не первая ячейка
+  if (labelWords.length === 1 && ROLE_RE.test(lower(labelWords[0]).replace(/[.:]+$/, '')) && items.length && items[0].kind === 'num'
+    && items[0].digits.length <= 2 && items[0].mult === 1 && !items[0].unitAfter && !items[0].neg) { labelWords.push(items[0].digits); items.shift(); }
   return { label: labelWords.join(' ').replace(/[\s:]+$/, ''), labelWords: labelWords.length, items, inner };
 }
 // строка текста → строки таблицы. Кусок «подпись + числа» — отдельная строка, если таких кусков ≥ 2 («Массовый: 7 900 · Стандарт: 5 100»)
@@ -1627,7 +1637,7 @@ function parseLine(line, rawLine) {
     } else {
       if (!cur) { cur = { label: '', labelWords: 0, items: [], inner: 0 }; rows.push(cur); }
       if (!p.items.length) {                                                  // кусок без чисел: подпись строки или пустая ячейка
-        if (!cur.items.length && !cur.label) { cur.label = p.label; cur.labelWords = p.labelWords; }
+        if (!cur.items.length && !cur.label) { cur.label = p.label; cur.labelWords = p.labelWords; cur.labelOwn = true; }
         else if (cur.items.length && i < pieces.length - 1) cur.items.push({ kind:'null' });
         return;
       }
@@ -1637,7 +1647,7 @@ function parseLine(line, rawLine) {
     cur.items = cur.items.concat(p.items); cur.inner += p.inner;
   });
   // подпись длиннее трёх слов или текст среди чисел — предложение, а не строка таблицы; одни коэффициенты «×1,02» — не показатели
-  return rows.filter(r => r.labelWords < 4 && r.inner < 3 && r.items.some(x => x.kind === 'num' && !x.coef))
+  return rows.filter(r => (r.labelWords < 4 || (r.labelOwn && r.labelWords <= 6)) && r.inner < 3 && r.items.some(x => x.kind === 'num' && !x.coef))
     .map(r => ({ label: r.label, items: r.items, inner: r.inner, raw: rawLine }));
 }
 // строка конкурентов игры → строки по товарам (цена, класс, продано) или null; товар — по букве или по имени
@@ -1648,7 +1658,7 @@ function parseCompetitors(line, rawLine) {
   COMP_ITEM.lastIndex = 0; let it;
   while ((it = COMP_ITEM.exec(rest))) {
     const key = it[2].length === 1 ? LETTERS[lower(it[2])] : guessProduct(it[2]); if (!key) continue;
-    rows.push({ label: name + ' · ' + key, cells: [num(it[3]), num(it[4]), num(it[5])], raw: rawLine, guess: { kind:'rival', product: key, rival: name } });
+    rows.push({ label: name + ' · ' + key, cells: [num(it[3]), /[0-9оoзliб]/.test(it[4]) ? num(it[4]) : null, num(it[5])], raw: rawLine, guess: { kind:'rival', product: key, rival: name } });
   }
   return rows.length ? rows : null;
 }
@@ -1682,7 +1692,7 @@ function layouts(items, E, types, profile) {
         const nj = j < J ? j + 1 : J, sc = prev + msum + (j <= E ? cellScore(j, v, types, profile) : 0);
         if (sc > dp[base + nj]) { dp[base + nj] = sc; bs[base + nj] = s; bj[base + nj] = j; }
       }
-      if (s === 0 || !mergeable(items[s - 1], items[s])) break;
+      if (s === 0 || i - s >= MAX_GROUP || !mergeable(items[s - 1], items[s])) break;
       msum += mergeScore(items[s - 1], items[s]); s--;
     }
   }
@@ -1732,8 +1742,9 @@ function identity(cells, types) {
 const canIdentity = (items, types) => (types.indexOf('revenue') >= 0 && types.indexOf('price') >= 0 && types.indexOf('sold') >= 0) || items.filter(x => x.kind === 'num' && (x.unitAfter || x.mult > 1)).length === 1;
 // лучшая раскладка строки при T столбцах: ДП даёт лучшую на каждое число ячеек; при ничьей решает тождество выручки —
 // сравниваем лучшие раскладки всех размеров и соседей раскладки при T (обмен одной склейки)
-function resolve(items, T, types, profile, Lpre) {
+function resolve(items, T, types, profile, Lpre, light) {
   const L = Lpre && Lpre.J > (T || 0) ? Lpre : layoutsFor(items, T, types, profile), ident = canIdentity(items, types);
+  const deep = ident && !light && items.length <= 24;                       // перебор соседних раскладок — только для строк обычной длины
   let best = null, bestSc = -Infinity;
   const consider = (merges) => { const cells = buildCells(items, merges), sc = scoreLayout(items, merges, cells, types, profile) + (cells.length === T ? B_N : 0) + (ident ? identity(cells, types) : 0);
     if (sc > bestSc) { bestSc = sc; best = cells; } };
@@ -1742,7 +1753,7 @@ function resolve(items, T, types, profile, Lpre) {
   order.forEach(j => {
     if (L.score(j) === -Infinity) return;
     const m = L.merges(j); consider(m);
-    if (!ident || L.score(j) < smax - B_N - 1.5) return;                       // соседей смотрим только там, где премии могут перевесить
+    if (!deep || L.score(j) < smax - B_N - 1.5) return;                       // соседей смотрим только там, где премии могут перевесить
     const cand = []; for (let k = 1; k < items.length; k++) if (mergeable(items[k - 1], items[k]) && m.indexOf(k) < 0) cand.push(k);
     m.forEach(out => cand.forEach(inn => consider(m.filter(k => k !== out).concat([inn]).sort((a, b) => a - b))));
   });
@@ -1751,37 +1762,44 @@ function resolve(items, T, types, profile, Lpre) {
 
 // ---------- заголовок ----------
 function guessHeader(text) {
-  const s = lower(text == null ? '' : text).trim();
+  const s = deLatin(lower(text == null ? '' : text)).trim();
   if (!s) return null;
-  for (let i = 0; i < HEADERS.length; i++) if (HEADERS[i][1].test(s)) return HEADERS[i][0];
+  const s2 = s.replace(/\s+/g, '');                                   // «Продав цов» — слово шапки, разорванное пробелом
+  for (let i = 0; i < HEADERS.length; i++) if (HEADERS[i][1].test(s) || HEADERS[i][1].test(s2)) return HEADERS[i][0];
   return null;
+}
+// OCR рвёт слово шапки надвое («Продав» + «цов»): склеиваем, если склейка узнаётся, а куски порознь — нет
+function glueSegs(segs) {
+  const out = [];
+  for (let i = 0; i < segs.length; i++) { const a = segs[i], b = segs[i + 1];
+    if (b && !guessHeader(a) && !guessHeader(b) && guessHeader(a + b)) { out.push(a + b); i++; continue; }
+    out.push(a); }
+  return out;
 }
 // строки заголовка → сегменты (столбцы). Строки склеиваются в один поток слов: перенос может пройти внутри «Средняя цена» или перед «(дефицит)»
 function headerSegments(lines) {
-  if (lines.some(l => SEP_RE.test(l))) { let segs = []; lines.forEach(l => { segs = segs.concat(l.split(SEP_RE).map(s => s.trim()).filter(Boolean)); }); return segs; }
+  if (lines.some(l => SEP_RE.test(l))) { let segs = []; lines.forEach(l => { segs = segs.concat(l.split(SEP_RE).map(s => s.trim()).filter(Boolean)); }); return glueSegs(segs); }
   const segs = [];
   lines.join(' ').split(/\s+/).filter(Boolean).forEach(w => {
-    const lw = lower(w), prev = segs[segs.length - 1];
+    const lw = deLatin(lower(w)), prev = segs[segs.length - 1];
+    if (prev && prev.open && guessHeader(w) && guessHeader(w) !== guessHeader(prev.text)) prev.open = false;   // скобка не закрыта, а дальше уже другое поле
     if (prev && (prev.open || w[0] === '(' || UNIT_RE.test(lw.replace(/,$/, '')))) { prev.text += ' ' + w; prev.open = (prev.open || w[0] === '(') && !/\)$/.test(w); return; }
-    if (prev && prev.words === 1 && BIGRAMS.some(b => b[0].test(prev.first) && b[1].test(lw))) { prev.text += ' ' + w; prev.words++; return; }
+    if (prev && prev.words === 1 && BIGRAMS.some(b => b[0].test(prev.first) && (b[1].test(lw) || (b[2] && lw.length >= 4 && levenshtein(lw, b[2]) <= 1)))) { prev.text += ' ' + w; prev.words++; return; }
     segs.push({ text: w, first: lw, words: 1, open: false });
   });
-  return segs.map(s => s.text);
+  return glueSegs(segs.map(s => s.text));
 }
 // нечисловая строка — не заголовок, а предложение: служебные слова, «:» в конце, «±», тире с пробелами
 function isCaption(line) {
   if (/:\s*$|±|\s—\s/.test(line)) return true;
   return lower(line).split(/\s+/).filter(w => FN_WORDS.test(w)).length >= 2;
 }
-// сегменты заголовка → столбцы: титул карточки и подпись «Товар» — всё до столбца подписей (если левее него ≤ 1 поля: «Рынок и цены Товар …»)
-// или до первого распознанного поля — отбрасываем
-function headFields(segs, hasLabels) {
+// сегменты заголовка → столбцы: титул карточки и подпись «Товар» — всё до столбца подписей (если левее него ≤ 1 поля: «Рынок и цены Товар …»);
+// остальные лишние ведущие сегменты отбрасывает grid, когда узнает число ячеек в строках
+function headFields(segs) {
   let h = segs.map(t => ({ text: t, guess: guessHeader(t) }));
   let lastRec = -1; h.forEach((x, i) => { if (x.guess) lastRec = i; });
   for (let i = lastRec - 1; i >= 0; i--) if (LABEL_COL.test(lower(h[i].text).replace(/[,.:]+$/, '')) && h.slice(0, i).filter(x => x.guess).length <= 1) { h = h.slice(i + 1); break; }
-  const first = h.findIndex(x => x.guess);
-  if (first > 0) return h.slice(first);
-  if (first < 0 && hasLabels && h.length > 1) return h.slice(1);
   return h;
 }
 // заголовок под n столбцов: лишние нераспознанные сегменты (справа) — мусор; распознанные поля не трогаем (строка может быть короче шапки)
@@ -1811,13 +1829,13 @@ function guessProduct(text) {
 
 // ---------- таблица ----------
 // строка таблицы, разорванная переносом («Массовый 7 900 6 500» + «820 3»): подпись с недостающими числами + соседняя строка без подписи
-function joinSplitRows(raw, T, types) {
+function joinSplitRows(raw, T, types, light) {
   for (let i = 0; i < raw.length; i++) {
     const r = raw[i]; if (r.cells && !r.items) continue;
     if (!r.label || r.cells.length >= T) continue;
     const tryJoin = (o, before) => {
       if (!o || o.guess || o.label || !o.items) return false;
-      const items = r.items.concat(o.items), cells = resolve(items, T, types, null);
+      const items = r.items.concat(o.items), cells = resolve(items, T, types, null, null, light);
       if (cells.length !== T) return false;
       r.items = items; r.cells = cells; r.raw = before ? o.raw + '\n' + r.raw : r.raw + '\n' + o.raw;
       raw.splice(raw.indexOf(o), 1); return true;
@@ -1826,27 +1844,35 @@ function joinSplitRows(raw, T, types) {
     if (i > 0 && tryJoin(raw[i - 1], true)) i--;
   }
 }
-function grid(text) {
+function gridPlain(text) {
   const out = { rows: [], header: [], format: 'generic' };
   const src = typeof text === 'string' ? text : text == null ? '' : String(text);
   const lines = src.replace(/\r/g, '').split('\n').map(s => s.trim()).filter(Boolean);
-  let raw = [], headerLines = [], comp = 0, ctx = '', pendingRival = null, strong = false;
+  let raw = [], headerLines = [], comp = 0, ctx = '', pendingRival = null, strong = false, lastComp = null;
+  let tailLabel = null;
   lines.forEach(rawLine => {
-    const line = rawLine.replace(SPACES_RE, ' ');                             // raw строки — как в источнике, разбор — с обычными пробелами
+    let line = rawLine.replace(SPACES_RE, ' ');
+    if (tailLabel && /^[0-9]/.test(line)) line = tailLabel + ': ' + line;     // подпись с прошлой строки
+    tailLabel = null;                             // raw строки — как в источнике, разбор — с обычными пробелами
     if (COMP_NONE.test(line)) return;
     let c = parseCompetitors(line, rawLine);
     if (!c && pendingRival) c = parseCompetitors(pendingRival + ': ' + line, rawLine); // «Титан:» на своей строке, товары — на следующей
     pendingRival = null;
-    if (c) { c.forEach(r => raw.push(r)); comp++; strong = true; return; }
+    if (!c && lastComp && line.indexOf('/') > 0 && line.indexOf(':') < 0) c = parseCompetitors(lastComp + ': ' + line, rawLine);  // хвост строки, оторванный OCR
+    if (c) { c.forEach(r => raw.push(r)); comp++; strong = true; lastComp = c[0].guess.rival; return; }
     const nm = COMP_NAME.exec(line);
-    if (nm && nm[1].trim().split(/\s+/).length <= 3) { pendingRival = nm[1].trim(); ctx = line; return; }
+    if (nm && nm[1].trim().split(/\s+/).length <= 3 && /[a-zа-яё]/i.test(nm[1])) { pendingRival = nm[1].trim(); ctx = line; return; }
+    const tl = TAIL_LABEL.exec(line);
+    if (tl && /[0-9]/.test(line)) tailLabel = tl[1].trim();
     const rs = parseLine(line, rawLine);
     if (rs.length) { rs.forEach(r => { r.ctx = ctx; raw.push(r); if (r.items.filter(x => x.kind === 'num').length >= 2) strong = true; }); return; }
     if (/[0-9]/.test(line) || isCaption(line)) { ctx = line; return; }         // подпись блока: «Спрос в этом квартале…:», «Ориентир: …»
     ctx = '';
     // заголовок — до первой строки таблицы; после строк-однострочников (новости) — только если больше половины сегментов распознаны
     if (!raw.length) headerLines.push(line);
-    else if (!strong) { const sg = headerSegments([line]), k = sg.filter(s => guessHeader(s)).length; if (k >= 2 && k * 2 >= sg.length) headerLines.push(line); }
+    else if (!strong) { const sg = headerSegments([line]), k = sg.filter(s => guessHeader(s)).length;
+      // шапка второй карточки: половина сегментов распознана, либо она начинается со столбца подписей («Товар | Прогноз | Факт | …»)
+      if ((k >= 2 && k * 2 >= sg.length) || (k >= 1 && sg.length >= 3 && LABEL_COL.test(lower(sg[0]).replace(/[,.:]+$/, '')))) headerLines.push(line); }
   });
   raw = raw.filter(r => !(r.ctx && CTX_MINE.test(r.ctx)));                    // «Ориентир: сколько придёт к вам» — оценка, а не вход
   if (!raw.length) return out;
@@ -1856,22 +1882,27 @@ function grid(text) {
   const rec = headerLines.map(l => headerSegments([l]).filter(s => guessHeader(s)).length);
   let hl = headerLines;
   if (rec.some(k => k > 0)) { let st = 0; while (st < hl.length - 1 && !rec[st]) st++; hl = hl.slice(st); } else hl = hl.slice(-1);
-  const fields = headFields(hl.length ? headerSegments(hl) : [], hasLabels), types = fields.map(h => h.guess);
-  const nh = fields.length ? fields.length : null;
-  const pending = raw.filter(r => !r.cells);
+  let fields = headFields(hl.length ? headerSegments(hl) : []), types = fields.map(h => h.guess);
+  let nh = fields.length ? fields.length : null;
+  const pending = raw.filter(r => !r.cells), light = raw.length > 200;   // очень большая вставка: считаем дёшево
   let T = null;
   if (pending.length) {
     // проход 0: раскладки по правдоподобию без числа столбцов
-    pending.forEach(r => { r.L = layoutsFor(r.items, nh, types, null); r.c0 = resolve(r.items, null, types, null, r.L).length;
+    const pass0 = () => pending.forEach(r => { r.L = layoutsFor(r.items, nh, types, null); r.c0 = resolve(r.items, null, types, null, r.L, light).length;
       r.smax = -Infinity; for (let j = 1; j <= r.L.J; j++) r.smax = Math.max(r.smax, r.L.score(j)); });
+    pass0();
+    // сегментов шапки больше, чем ячеек в строках: лишние ведущие нераспознанные — титул карточки или столбец подписей
+    let cut = 0; const nCells = mode(pending.map(r => r.c0));
+    while (cut < fields.length && fields.length - cut > nCells && !fields[cut].guess) cut++;
+    if (cut) { fields = fields.slice(cut); types = fields.map(h => h.guess); nh = fields.length || null; pass0(); }
     // число столбцов: заголовок, если он правдоподобен хотя бы для половины строк и лучший хотя бы для трети (шапка с лишним сегментом «Продав цов» —
     // не опора); иначе мода по строкам (без строк с текстом среди чисел)
     if (nh != null && nh <= E_MAX && pending.filter(r => r.L.score(nh) >= r.smax - B_N).length * 2 >= pending.length
       && pending.filter(r => r.c0 === nh).length * 3 >= pending.length) T = nh;
     if (T == null) { const src = pending.filter(r => !r.inner); T = mode((src.length ? src : pending).map(r => r.c0)); }
     // проход 1: число ячеек с премией за T, ничьи — по тождеству выручки
-    pending.forEach(r => { r.cells = resolve(r.items, T, types, null, r.L); });
-    joinSplitRows(raw, T, types);
+    pending.forEach(r => { r.cells = resolve(r.items, T, types, null, r.L, light); });
+    joinSplitRows(raw, T, types, light);
     // проход 2 — только без заголовка (с известными типами столбцов профиль лишь мешает): для строк с неоднозначными разрядами
     // профиль порядка величин по столбцам — медиана log10 по другим строкам, без нулей, от двух значений
     if (!types.some(Boolean)) {
@@ -1881,7 +1912,7 @@ function grid(text) {
       const profAll = cols.map(a => a && a.length >= 2 ? median(a) : null);
       raw.forEach((r, i) => { if (!r.items || !ambiguous(r.items)) return;
         const prof = big ? profAll : cols.map(a => { const o = a ? a.filter(x => x.i !== i) : []; return o.length >= 2 ? median(o) : null; });
-        r.cells = resolve(r.items, T, types, prof); });
+        r.cells = resolve(r.items, T, types, prof, null, light); });
     }
   }
   const nCols = mode(raw.map(r => r.cells.length));
@@ -1889,20 +1920,198 @@ function grid(text) {
   out.header = allComp ? [{ text:'Цена', guess:'price' }, { text:'Класс', guess:'quality' }, { text:'Продано', guess:'sold' }]
     : !fields.length && nCols === 1 && fc * 2 >= raw.length ? [{ text:'Прогноз', guess:'forecast' }]
     : alignHeader(fields, nCols);
+  // карточка известного формата: набор полей шапки совпал целиком — порядок столбцов берём канонический, а не порядок слов в тексте
+  const gs0 = out.header.map(h => h.guess).filter(Boolean);
+  const fm = FORMATS.filter(f => out.header.length === f.cols.length && gs0.length === f.cols.length && f.cols.every(x => gs0.indexOf(x) >= 0))[0];
+  if (fm) out.header = fm.cols.map(c => out.header.filter(h => h.guess === c)[0] || { text: COL_NAMES[c] || c, guess: c });
   const g = out.header.map(h => h.guess);
   out.format = allComp ? 'competitors'
     : g.indexOf('demand') >= 0 && g.indexOf('sellers') >= 0 ? 'market'
     : g.indexOf('produced') >= 0 && g.indexOf('quality') >= 0 ? 'report'
     : g.indexOf('forecast') >= 0 ? 'research' : 'generic';
+  const known = out.format === 'market' || out.format === 'report' || out.format === 'research';
   out.rows = raw.map(r => {
     if (r.guess) return { label: r.label, cells: r.cells, raw: r.raw, guess: r.guess };
     const product = guessProduct(r.label);
     const guess = out.format === 'market' || out.format === 'research' || (r.ctx && CTX_FORECAST.test(r.ctx)) ? { kind:'market', product, rival: null }
       : product ? { kind:'product', product, rival: null }
       : r.label ? { kind:'rival', product: null, rival: r.label } : null;
-    return { label: r.label, cells: r.cells, raw: r.raw, guess };
-  });
+    const row = { label: r.label, cells: r.cells, raw: r.raw, guess: known && !product ? null : guess };
+    if (known && !product) row.skip = true;              // в карточке рынка и отчёта строки — только товары: титул, итоги и пояснения не данные
+    if (r.cells.length < nCols) row.short = true;        // ячеек меньше, чем столбцов: часть чисел потерялась при распознавании
+    return row;
+  }).filter(r => !(r.skip && r.cells.length * 2 <= nCols));   // огрызок титула («Рынок, кв. 3») — не строка таблицы
   return out;
+}
+
+// ---------- наклонный снимок: сборка строк из обрывков ----------
+/* На снимке под углом Vision режет строку таблицы на 2–3 текстовые: при наклоне вправо правый край уходит вниз и обрывки
+   идут ПОСЛЕ подписи, при наклоне влево — вверх и ПЕРЕД ней; слова шапки перемешиваются и попадают в строки данных
+   (фикстуры src/sandbox/ocr/photo2-*.txt). Собираем заново: канонический порядок столбцов формата (шапка может быть
+   перепутана и неполна — правило 1 ROUND2.md) и поиск лучшей раскладки обрывков лучом. Наклон влево сводится к наклону
+   вправо переворотом порядка строк: тогда ячейки строки всегда идут ПОСЛЕ её подписи, по возрастанию столбца, а внутри
+   текстовой строки номер строки таблицы не растёт (правый край соседней строки дотягивается до следующей подписи). */
+const FORMATS = [
+  { name:'market', cols:['demand', 'sold', 'avgPrice', 'sellers'] },
+  { name:'report', cols:['produced', 'quality', 'price', 'sold', 'revenue', 'lost', 'refused', 'invEnd'] },
+];
+const ZERO_COLS = { lost:1, refused:1, invEnd:1 };   // столбцы, где игра печатает 0, — одиночный ноль Vision не видит
+const BEAM = 160, LOOKBACK = 3, MAX_SKIP = 2;        // ширина луча, на сколько строк назад тянется правый край, пропуск подряд
+const HOLE = -1.2, DROP = -5, COL_BIAS = -0.02, DRIFT = -0.15;  // цена пропуска, брошенного числа, сдвига значения вправо, сноса в строку выше
+const TILT_LINES = 300, TILT_ROWS = 40;
+
+// формат по набору распознанных полей шапки (порядок и полнота не важны)
+function tiltFormat(set) {
+  let best = null, bestHit = 0;
+  FORMATS.forEach(f => { const hit = set.filter(g => f.cols.indexOf(g) >= 0).length;
+    if (hit >= 3 && set.length - hit <= 1 && hit > bestHit) { bestHit = hit; best = f; } });
+  return best;
+}
+// строки текста → токены: { r } — подпись строки (товар), { v } — число. Слова шапки уходят в fields, титул карточки отбрасывается.
+// Кусок разбираем как ячейку (forced): «9 358» — одно число; строка без разделителей — те же правила разрядов
+function tiltTokens(lines) {
+  const out = [], labels = [], fields = [];
+  lines.forEach((rawLine, li) => {
+    const line = rawLine.replace(SPACES_RE, ' '), toks = [];
+    line.split(SEP_RE).map(s => s.trim()).filter(Boolean).forEach(piece => {
+      const pp = /[0-9]/.test(piece) ? parsePiece(piece, true) : { label: piece, labelWords: 1, items: [] };
+      if (pp.labelWords) {
+        const g = guessHeader(pp.label);
+        if (g) { if (fields.indexOf(g) < 0) fields.push(g); }
+        else if (LABEL_COL.test(lower(pp.label).replace(/[,.:]+$/, ''))) { /* «Товар» — заголовок столбца подписей */ }
+        else if (guessProduct(pp.label)) { labels.push(pp.label); toks.push({ r: labels.length - 1 }); }
+      }
+      pp.items.forEach(it => { if (it.kind === 'num' && !it.coef) toks.push({ v: groupValue([it], 0, 1) }); });
+    });
+    if (toks.length) out.push({ toks, raw: rawLine, li });
+  });
+  return { lines: out, labels, fields };
+}
+// очки строки целиком: тождество отчёта (выручка = цена × продано), пустой склад (остаток = произведено − продано), продано ≤ спроса
+function tiltRowScore(cells, types) {
+  let s = identity(cells.map(v => ({ v, unit: false })), types);
+  const g = (t) => { const j = types.indexOf(t); return j >= 0 ? cells[j] : null; };
+  const pr = g('produced'), so = g('sold'), iv = g('invEnd'), de = g('demand'), lo = g('lost');
+  if (pr != null && so != null && iv != null && iv === pr - so) s += 1;
+  if (iv > 0 && lo > 3) s -= 0.8;   // непустой склад и заметное «упущено» несовместимы: покупателю отказали не из-за дефицита
+  if (de != null && so != null) s += so <= de ? 0.5 : -1;
+  return s;
+}
+const tiltClone = (st) => ({ pos: st.pos.slice(), cells: st.cells.slice(), rb: st.rb.slice(), col: st.col.slice(), open: st.open, score: st.score });
+// положить len чисел в строку r начиная со столбца c
+function tiltPlace(st, r, c, toks, i, len, types, ceil) {
+  const s2 = tiltClone(st), row = st.cells[r].slice();
+  let add = HOLE * (c - st.pos[r]) + DRIFT * (ceil - r);
+  for (let k = 0; k < len; k++) { const v = toks[i + k].v; row[c + k] = v; add += cellScore(c + k, v, types, null) + COL_BIAS * (c + k); }
+  for (let k = 0; k < len; k++) s2.col[c + k] = r;                       // столбец занят строкой r: выше него в этом столбце уже никого
+  s2.cells[r] = row; s2.pos[r] = c + len;
+  const rb = tiltRowScore(row, types); s2.rb[r] = rb; s2.score = st.score + add + rb - st.rb[r];
+  return s2;
+}
+// раскладка одной текстовой строки: пробеги чисел по строкам таблицы с невозрастающим номером; ceil — верхняя доступная строка
+function tiltExpand(st, toks, i, ceil, same, T, types, out) {
+  if (out.length > 24000) return;
+  if (i >= toks.length) { out.push(st); return; }
+  const tk = toks[i];
+  if (tk.r != null) {                                                   // подпись открывает свою строку таблицы
+    if (tk.r !== st.open) { tiltExpand(st, toks, i + 1, ceil, same, T, types, out); return; }
+    const s2 = tiltClone(st); s2.open = tk.r + 1; s2.pos[tk.r] = 0; s2.cells[tk.r] = new Array(T).fill(null);
+    tiltExpand(s2, toks, i + 1, tk.r, -1, T, types, out); return;
+  }
+  let end = i; while (end < toks.length && toks[end].r == null) end++;
+  let any = false;
+  for (let r = ceil; r >= 0 && r > ceil - LOOKBACK; r--) {
+    if (r >= st.open || st.pos[r] < 0 || st.pos[r] >= T) continue;
+    for (let s = r === same ? 1 : 0; s <= MAX_SKIP; s++) {
+      const c = st.pos[r] + s; if (c >= T) break;
+      const cap = Math.min(T - c, end - i);
+      for (let len = 1; len <= cap; len++) {
+        if (st.col[c + len - 1] > r) break;                                  // в столбце уже стоит строка ниже — порядок сверху вниз нарушать нельзя
+        any = true; tiltExpand(tiltPlace(st, r, c, toks, i, len, types, ceil), toks, i + len, r, r, T, types, out);
+      }
+    }
+  }
+  if (!any) { const d = tiltClone(st); d.score += DROP; tiltExpand(d, toks, i + 1, ceil, same, T, types, out); }
+}
+// луч по текстовым строкам: на каждом шаге оставляем лучшие состояния, по одному на расклад столбцов
+function tiltAssemble(tl, nRows, T, types) {
+  let beam = [{ pos: new Array(nRows).fill(-1), cells: new Array(nRows).fill(null), rb: new Array(nRows).fill(0), col: new Array(T).fill(-1), open: 0, score: 0 }];
+  for (let i = 0; i < tl.length; i++) {
+    const out = [];
+    beam.forEach(st => tiltExpand(st, tl[i].toks, 0, st.open - 1, -1, T, types, out));
+    if (!out.length) return null;
+    out.sort((a, b) => b.score - a.score);
+    const seen = Object.create(null), keep = [];
+    for (let k = 0; k < out.length && keep.length < BEAM; k++) { const key = out[k].pos.join(','); if (seen[key]) continue; seen[key] = 1; keep.push(out[k]); }
+    beam = keep;
+  }
+  let best = null;
+  beam.forEach(st => { let holes = 0;
+    for (let r = 0; r < nRows; r++) holes += st.pos[r] >= 0 ? T - st.pos[r] : T;   // пропуски внутри строки уже оплачены при раскладке
+    const sc = st.score + HOLE * holes;
+    if (!best || sc > best.score) best = { st, score: sc }; });
+  return best ? (best.st.score = best.score, best.st) : null;
+}
+// состояние луча → строки таблицы; пропуск в столбце, где игра печатает 0, заполняем нулём и помечаем (filled), остальные — missing
+function tiltRows(st, labels, T, types, srcRaw) {
+  return labels.map((lab, r) => {
+    const cells = st.cells[r] ? st.cells[r].slice() : new Array(T).fill(null), filled = [], missing = [];
+    cells.forEach((v, j) => { if (v != null) return; if (ZERO_COLS[types[j]]) { cells[j] = 0; filled.push(j); } else missing.push(j); });
+    const row = { label: lab, cells, raw: srcRaw[r] || lab };
+    if (filled.length) row.filled = filled;
+    if (missing.length) { row.missing = missing; row.short = true; }
+    return row;
+  });
+}
+// качество разбора: строка с подписью и полным набором ячеек — 2, обрывок без подписи — минус
+function tiltQuality(rows, T) {
+  let q = 0;
+  rows.forEach(r => { const n = r.cells.filter(v => v != null).length;
+    if (!r.label) { q -= 2; return; }
+    q += n === T ? 2 : n === T - 1 ? 1.5 : n / Math.max(1, T); });
+  return q;
+}
+// есть ли смысл пересобирать: обрывки без подписи, дыры, подпись-заголовок или разное число ячеек
+function tiltWanted(out) {
+  if (out.rows.length < 2) return false;
+  const n = mode(out.rows.map(r => r.cells.length)), f = FORMATS.filter(x => x.name === out.format)[0];
+  if (f && f.cols.length !== n) return true;                              // шапка известного формата, а ячеек меньше — часть чисел потерялась
+  return out.rows.some(r => !r.label || r.cells.length !== n || r.cells.some(v => v == null)
+    || guessHeader(r.label) || LABEL_COL.test(lower(r.label).replace(/[,.:]+$/, '')));
+}
+// пересборка наклонного снимка: пробуем оба направления наклона, берём лучшее
+function tiltGrid(src) {
+  const lines = src.replace(/\r/g, '').split('\n').map(s => s.trim()).filter(Boolean);
+  if (lines.length < 3 || lines.length > TILT_LINES) return null;
+  let best = null;
+  for (let dir = 0; dir < 2; dir++) {
+    const tk = tiltTokens(dir ? lines.slice().reverse() : lines);
+    const fmt = tiltFormat(tk.fields);
+    if (!fmt || tk.labels.length < 2 || tk.labels.length > TILT_ROWS) continue;
+    const T = fmt.cols.length, st = tiltAssemble(tk.lines, tk.labels.length, T, fmt.cols);
+    if (!st) continue;
+    const srcRaw = []; tk.lines.forEach(l => l.toks.forEach(t => { if (t.r != null && srcRaw[t.r] == null) srcRaw[t.r] = l.raw; }));
+    let rows = tiltRows(st, tk.labels, T, fmt.cols, srcRaw);
+    if (dir) rows = rows.reverse();
+    const q = tiltQuality(rows, T);
+    if (!best || q > best.q || (q === best.q && st.score > best.score)) best = { q, score: st.score, rows, fmt, T };
+  }
+  if (!best) return null;
+  const out = { rows: best.rows, header: best.fmt.cols.map(c => ({ text: COL_NAMES[c] || c, guess: c })), format: best.fmt.name, tilt: true };
+  out.rows.forEach(r => { r.guess = { kind: best.fmt.name === 'market' ? 'market' : 'product', product: guessProduct(r.label), rival: null }; });
+  return out;
+}
+const COL_NAMES = { demand:'Спрос', sold:'Продано', avgPrice:'Средняя цена', sellers:'Продавцов', produced:'Произведено',
+  quality:'Класс', price:'Цена', revenue:'Выручка', lost:'Упущено', refused:'Отказы', invEnd:'Остаток' };
+
+// разбор текста: обычный проход, а если строки рассыпались (наклонный снимок) — пересборка, когда она даёт лучший результат
+function gridOne(text) {
+  const src = typeof text === "string" ? text : text == null ? "" : String(text);
+  const out = gridPlain(src);
+  if (!tiltWanted(out)) return out;
+  const t = tiltGrid(src);
+  if (!t) return out;
+  return tiltQuality(t.rows, t.header.length) > tiltQuality(out.rows, t.header.length) ? t : out;
 }
 
 // ---------- патч входов песочницы ----------
@@ -1924,7 +2133,8 @@ function apply(gridObj, mapping) {
   rows.forEach((row, i) => {
     const m = mrows[i]; if (!m || !row || !Array.isArray(row.cells)) return;
     row.cells.forEach((v, j) => {
-      const f = cols[j]; if (!f || typeof v !== 'number' || !isFinite(v)) return;
+      const cs = Array.isArray(cols[0]) ? (cols[row.block || 0] || []) : cols;
+      const f = cs[j]; if (!f || typeof v !== 'number' || !isFinite(v)) return;
       if (f === 'demand' || f === 'forecast') { if (m.product && m.kind !== 'rival') put(patch, ['demand', m.product], v); return; }
       if (f === 'sellers' || f === 'avgPrice') return;                        // итоги рынка, а не входы
       if (m.kind === 'rival') { if (m.rival && m.product) put(patch, ['rivals', m.rival, 'products', m.product, f], v); }
@@ -1932,6 +2142,49 @@ function apply(gridObj, mapping) {
     });
   });
   return patch;
+}
+
+// строка-шапка: половина сегментов — поля, либо она начинается со столбца подписей
+function isHeadLine(l) {
+  if (/[0-9]/.test(l)) return false;
+  const sg = headerSegments([l]), k = sg.filter(x => guessHeader(x)).length;
+  return (k >= 2 && k * 2 >= sg.length) || (k >= 1 && sg.length >= 3 && LABEL_COL.test(lower(sg[0]).replace(/[,.:]+$/, '')));
+}
+// две карточки в одном скане («Рынок», ниже «Ваш прошлый квартал»): режем по шапке, которая идёт после строк с числами;
+// титул новой карточки (строки без чисел прямо над шапкой) уезжает в неё
+function splitBlocks(lines) {
+  const out = []; let cur = [], data = false;
+  lines.forEach(l => {
+    if (data && isHeadLine(l)) {
+      let t = cur.length; while (t > 0 && !/[0-9]/.test(cur[t - 1]) && !isHeadLine(cur[t - 1])) t--;
+      const tail = cur.slice(t); cur = cur.slice(0, t);
+      if (cur.length) out.push(cur);
+      cur = tail; data = false;
+    }
+    cur.push(l);
+    if (/[0-9]/.test(l)) data = true;
+  });
+  if (cur.length) out.push(cur);
+  // блок, где нет двух строк с числами, — это титул или сводка соседней карточки, а не отдельная таблица
+  const nd = (b) => b.filter(l => /[0-9]/.test(l)).length;
+  for (let i = 0; i < out.length; i++) if (nd(out[i]) < 2) {
+    if (i + 1 < out.length) { out[i + 1] = out[i].concat(out[i + 1]); out.splice(i, 1); i--; }
+    else if (i > 0) { out[i - 1] = out[i - 1].concat(out[i]); out.splice(i, 1); i--; }
+  }
+  return out;
+}
+// разбор текста: если в нём две карточки, каждая разбирается своей шапкой, строки помечаются номером карточки (row.block)
+function grid(text) {
+  const src = typeof text === 'string' ? text : text == null ? '' : String(text);
+  const lines = src.replace(/\r/g, '').split('\n').map(x => x.trim()).filter(Boolean);
+  if (lines.length < 4 || lines.length > TILT_LINES) return gridOne(src);
+  const blocks = splitBlocks(lines);
+  if (blocks.length < 2 || blocks.length > 6) return gridOne(src);
+  const parts = blocks.map(b => gridOne(b.join('\n'))).filter(p => p.rows.length);
+  if (parts.length < 2) return parts.length ? parts[0] : gridOne(src);
+  const out = { rows: [], header: parts[0].header, format: parts[0].format, blocks: parts.map(p => ({ header: p.header, format: p.format })) };
+  parts.forEach((p, bi) => p.rows.forEach(r => { r.block = bi; out.rows.push(r); }));
+  return out;
 }
 
 const Parse = { grid, guessHeader, guessProduct, apply };
@@ -2835,28 +3088,42 @@ function parseUI() {
   const text = ($('scanText') || {}).value || '', g = S.parsed = P.grid(text);
   const box = $('parseBox');
   if (!g.rows.length) { box.innerHTML = '<div class="box warn">Чисел в тексте не нашлось. Проверьте, что скан попал в поле, или наберите строки вида «Титан 1300 2 900».</div>'; return; }
-  const ncol = Math.max.apply(null, g.rows.map(r => r.cells.length));
-  const colGuess = (j) => (g.header && g.header[j] && g.header[j].guess) || '';
   const names = S.inp.products.map(p => p.name), rivalNames = S.inp.rivals.map(r => r.name);
   const rowOpts = (r) => { const lab = (r.label || '').toLowerCase(); let sel = ''; const gk = r.guess || {};
     if (gk.kind === 'product' && gk.product) sel = 'product:' + gk.product; else if (gk.kind === 'rival' && gk.rival) sel = 'rival:' + gk.rival; else if (gk.kind === 'market' && gk.product) sel = 'market:' + gk.product; else { const pi = names.findIndex(n => lab.indexOf(n.toLowerCase()) >= 0); if (pi >= 0) sel = 'product:' + S.inp.products[pi].key; const ri = rivalNames.findIndex(n => lab.indexOf(n.toLowerCase()) >= 0); if (ri >= 0) sel = 'rival:' + rivalNames[ri]; }
-    if (!sel && r.label && r.label.length > 1) sel = 'newrival:' + r.label.trim();
+    if (!sel && !r.skip && r.label && r.label.length > 1) sel = 'newrival:' + r.label.trim();
     const o = [['', '— пропустить']].concat(S.inp.products.map(p => ['product:' + p.key, 'Мой товар ' + p.name])).concat(rivalNames.map(n => ['rival:' + n, 'Соперник ' + n])).concat(r.label && r.label.length > 1 && !rivalNames.includes(r.label.trim()) ? [['newrival:' + r.label.trim(), 'Новый соперник «' + r.label.trim() + '»']] : []).concat(S.inp.products.map(p => ['market:' + p.key, 'Рынок ' + p.name]));
     return o.map(([v, t]) => `<option value="${esc(v)}" ${v === sel ? 'selected' : ''}>${esc(t)}</option>`).join(''); };
-  const head = `<tr><th>Строка</th>${Array.from({ length: ncol }, (_, j) => `<th><select data-col="${j}" style="min-width:110px;font-size:13px;padding:5px">${FIELDS.map(([v, t]) => `<option value="${v}" ${v === colGuess(j) ? 'selected' : ''}>${t}</option>`).join('')}</select></th>`).join('')}</tr>`;
-  const rows = g.rows.map((r, i) => `<tr><td><select data-row="${i}" style="font-size:13px;padding:5px">${rowOpts(r)}</select><div class="mut small">${esc(r.label || '')}</div></td>${Array.from({ length: ncol }, (_, j) => `<td>${r.cells[j] == null ? '<span class="mut">—</span>' : fmtInt(r.cells[j])}</td>`).join('')}</tr>`).join('');
-  box.innerHTML = `<div class="hint">Распознано строк: ${g.rows.length}${g.format && g.format !== 'generic' ? ' · формат: ' + esc(g.format) : ''}. Проверьте, что в шапке над каждой колонкой стоит верное поле, а слева у строки — чей это товар. Нажмите «Применить».</div>
-  <div class="tbl-wrap"><table class="tbl">${head}${rows}</table></div><div class="btns"><button class="btn pri sm" data-act="apply-parse">Применить</button></div>`;
+  const FMT = { market: 'Рынок', report: 'Ваш прошлый квартал', competitors: 'Конкуренты', research: 'Исследование' };
+  const blocks = g.blocks && g.blocks.length > 1 ? g.blocks : [{ header: g.header, format: g.format }];
+  let html = '', filled = 0, holes = 0;
+  blocks.forEach((b, bi) => {
+    const list = g.rows.map((r, i) => ({ r, i })).filter(x => (x.r.block || 0) === bi);
+    if (!list.length) return;
+    const ncol = Math.max.apply(null, list.map(x => x.r.cells.length));
+    const colGuess = (j) => (b.header && b.header[j] && b.header[j].guess) || '';
+    const head = `<tr><th>Строка</th>${Array.from({ length: ncol }, (_, j) => `<th><select data-col="${bi}:${j}" style="min-width:110px;font-size:13px;padding:5px">${FIELDS.map(([v, t]) => `<option value="${v}" ${v === colGuess(j) ? 'selected' : ''}>${t}</option>`).join('')}</select></th>`).join('')}</tr>`;
+    const body = list.map(({ r, i }) => `<tr><td><select data-row="${i}" style="font-size:13px;padding:5px">${rowOpts(r)}</select><div class="mut small">${esc(r.label || '')}</div></td>${Array.from({ length: ncol }, (_, j) => {
+      const v = r.cells[j];
+      if (v == null) { holes++; return '<span class="mut">—</span>'; }
+      if (r.filled && r.filled.indexOf(j) >= 0) { filled++; return `<span title="число не распозналось — подставлен ноль" style="color:var(--accent)">${fmtInt(v)}<sup>?</sup></span>`; }
+      return fmtInt(v); }).map(c => `<td>${c}</td>`).join('')}</tr>`).join('');
+    html += (blocks.length > 1 ? `<div class="hint" style="margin-top:10px"><b>Таблица ${bi + 1}${FMT[b.format] ? ' — ' + esc(FMT[b.format]) : ''}</b></div>` : '') + `<div class="tbl-wrap"><table class="tbl">${head}${body}</table></div>`;
+  });
+  const warn = filled || holes ? `<div class="box warn">Не все числа распознались: ${filled ? 'в ' + filled + ' ячейках подставлен ноль (помечены «?») — там, где игра печатает 0. ' : ''}${holes ? 'В ' + holes + ' ячейках стоит «—» — впишите число сами после «Применить». ' : ''}Сверьте со снимком: снимайте табличку сверху и ровно, тогда всё встаёт само.</div>` : '';
+  box.innerHTML = `<div class="hint">Распознано строк: ${g.rows.length}${blocks.length > 1 ? ' · таблиц: ' + blocks.length : g.format && g.format !== 'generic' ? ' · формат: ' + esc(g.format) : ''}. Проверьте, что в шапке над каждой колонкой стоит верное поле, а слева у строки — чей это товар. Нажмите «Применить».</div>
+  ${warn}${html}<div class="btns"><button class="btn pri sm" data-act="apply-parse">Применить</button></div>`;
 }
 function applyParse() {
   const g = S.parsed; if (!g) return;
-  const cols = Array.from(document.querySelectorAll('#parseBox select[data-col]')).map(s => s.value || null);
-  const rows = Array.from(document.querySelectorAll('#parseBox select[data-row]')).map(s => s.value);
+  const cols = {}, rows = {};                                                // у каждой таблицы скана своя шапка (data-col="таблица:столбец")
+  Array.from(document.querySelectorAll('#parseBox select[data-col]')).forEach(s => { const p = s.getAttribute('data-col').split(':'); (cols[+p[0]] = cols[+p[0]] || [])[+p[1]] = s.value || null; });
+  Array.from(document.querySelectorAll('#parseBox select[data-row]')).forEach(s => { rows[+s.getAttribute('data-row')] = s.value; });
   const inp = S.inp, ps = inp.products, c = inp.consts; let n = 0;
   const pidx = (key) => ps.findIndex(p => p.key === key);
   g.rows.forEach((r, i) => {
     const sel = rows[i]; if (!sel) return; const [kind, val] = [sel.split(':')[0], sel.slice(sel.indexOf(':') + 1)];
-    const get = (f) => { const j = cols.indexOf(f); return j >= 0 && r.cells[j] != null ? r.cells[j] : null; };
+    const get = (f) => { const cs = cols[r.block || 0] || [], j = cs.indexOf(f); return j >= 0 && r.cells[j] != null ? r.cells[j] : null; };
     const getDemand = () => { const v = get('demand'); return v != null ? v : get('forecast'); };            // «Прогноз» из исследования — тот же спрос
     if (kind === 'market') { const i2 = pidx(val), v = getDemand(); if (i2 >= 0 && v != null) { inp.demand[i2] = Math.round(v); n++; } const s = get('sold'), a = get('avgPrice'); if (i2 >= 0 && v == null && s != null) { inp.demand[i2] = Math.round(s); n++; } }
     else if (kind === 'product') { const i2 = pidx(val); if (i2 < 0) return; const d = inp.me.decision.products[i2];
