@@ -2106,6 +2106,78 @@ const Coach = { adsEffect, adsEffectText, adsMultiplier, adsPower, exportText, p
 if (typeof module !== 'undefined' && module.exports) module.exports = Coach; else root.Coach = Coach;
 })(typeof window !== 'undefined' ? window : globalThis);
 
+/* Песочница рынка — передача расклада из игры и превращение его во входы расчёта. Работает в браузере (window.Handoff) и в node. */
+(function (root) {
+'use strict';
+const clone = (o) => JSON.parse(JSON.stringify(o));
+const r10 = (x) => Math.round(x / 10) * 10;
+
+// Что игрок и так видит на экране команды: публичная таблица рынка, своё предприятие, купленное исследование, станки соперников.
+// Цены и классы соперников — только из купленных исследований (последнее известное), как в журнале разведки.
+function fromGame(E, st, teamId) {
+  const t = st.teams.find(x => x.id === teamId), q = st.quarter, ps = st.settings.products, ev = !!st.scenario.events;
+  const mods = ev ? E.eventMods(st, q) : null;
+  const news = E.newsFor(st, q);
+  const mrow = st.market.history.find(m => m.quarter === q - 1) || null;
+  const bought = t.intel && t.intel.q === q && t.intel.research;
+  let research = null;
+  if (bought) { const r = E.research(st, t); research = { forecast: r.forecast, adjusted: r.adjusted, mine: r.mine, competitors: r.competitors.map(c => ({ id: c.id, name: c.name, products: c.products })) }; }
+  const known = {}; // последнее известное о сопернике из прошлых исследований: { id: { q, products } }
+  t.history.forEach(h => { const r = h.intel && h.intel.research; if (!r || !r.competitors) return; r.competitors.forEach(c => { if (c.products) known[c.id] = { q: h.quarter - 1, products: c.products }; }); });
+  if (research) research.competitors.forEach(c => { if (c.products) known[c.id] = { q: q - 1, products: c.products }; });
+  const last = t.history.length ? t.history[t.history.length - 1] : null;
+  return {
+    v: 1, game: st.name, q, quarters: st.scenario.quarters, currency: st.settings.currency, hard: !!st.settings.hard,
+    products: clone(ps), consts: clone(st.consts),
+    rate: E.bankRate(st, q), wage: ev ? E.wageNow(st, q) : st.consts.wage, rawMods: mods ? mods.raw.slice() : ps.map(() => 1), bankCrisis: E.bankCrisis(st, q),
+    news: { ratio: news.ratio, nowRatio: news.nowRatio, text: news.text, phaseText: news.phaseText, nowText: news.nowText },
+    market: mrow ? { quarter: mrow.quarter, products: mrow.products.map(x => ({ demand: x.demand, sold: x.sold, avgPrice: x.avgPrice, sellers: x.sellers })) } : null,
+    research,
+    me: { id: t.id, name: t.name, seat: st.teams.filter(x => x.status === 'active' && x.id !== t.id && x.id < t.id).length, cash: t.cash, debt: t.debt, creditLimit: E.creditLimit(st, t), creditLimitOverride: t.creditLimitOverride != null ? t.creditLimitOverride : null, machines: t.machines, machinesArriving: t.machinesArriving || 0, workers: t.workers, trained: t.trained, brand: t.brand,
+      inventory: clone(t.inventory), lastPrices: t.lastPrices.slice(), decision: t.decision ? clone(t.decision) : null,
+      last: last ? { quarter: last.quarter, profit: last.profit, products: last.products.map(pr => ({ price: pr.price, quality: pr.quality, produced: pr.produced, sold: pr.sold, revenue: pr.revenue || 0, lost: Math.round(pr.lost || 0), refused: Math.round(pr.refused || 0), invEnd: pr.invEnd || 0, ads: pr.ads || 0 })) } : null },
+    rivals: st.teams.filter(x => x.id !== t.id && x.status === 'active').map(x => ({ id: x.id, name: x.name, machines: x.machines, machinesArriving: x.machinesArriving || 0, workers: x.workers, known: known[x.id] || null })),
+  };
+}
+
+// Входы Calc.quarter из расклада. Чего игрок не знает — оценки, помеченные в meta (чтобы страница показала «оценка»).
+function toInputs(pl) {
+  const ps = pl.products, c = pl.consts, meta = { demand: [], rivals: [] };
+  const demand = ps.map((p, i) => {
+    if (pl.research) { meta.demand[i] = 'исследование'; return pl.research.forecast[i]; }
+    const m = pl.market && pl.market.products[i];
+    if (m && m.demand > 0) { meta.demand[i] = 'оценка по прошлому кварталу'; return Math.round(m.demand * (pl.news && pl.news.nowRatio ? pl.news.nowRatio : 1)); }
+    meta.demand[i] = 'по умолчанию'; return p.demand;
+  });
+  const me = pl.me, lastP = (i) => me.last ? me.last.products[i] : null;
+  const dec = me.decision ? clone(me.decision) : { products: ps.map((p, i) => ({ produce: lastP(i) ? lastP(i).produced : 0, quality: lastP(i) && lastP(i).quality ? lastP(i).quality : 2, price: me.lastPrices[i] || p.ref, ads: 0 })), hire: 0, fire: 0, train: 0, buyMachines: 0, sellMachines: 0, loanTake: 0, loanRepay: 0 };
+  dec.research = false; dec.dossier = false; dec.offerFee = 0;
+  const rivals = pl.rivals.map((rv, k) => {
+    const kp = rv.known ? rv.known.products : null, est = { ads: [], offered: [] };
+    const products = ps.map((p, i) => {
+      const x = kp ? kp[i] : null;
+      if (!x || !x.price) { est.offered[i] = false; return { produce: 0, quality: 2, price: p.ref, ads: 0 }; }
+      // предложение ≈ продано + запас; реклама ≈ 6 % ожидаемой выручки — так ведут себя боты-«середняки»
+      est.offered[i] = true; est.ads[i] = true;
+      return { produce: 0, quality: x.quality || 2, price: x.price, ads: r10(0.06 * x.price * x.sold / 100) * 100, _offered: r10(x.sold * 1.15) };
+    });
+    meta.rivals[k] = { knownQ: rv.known ? rv.known.q : null, est };
+    return { name: rv.name, brand: 1.0, machines: rv.machines || null, workers: rv.workers || null, trained: 0,
+      inventory: products.map(o => ({ units: o._offered || 0, q: c.qualityScore[o.quality] })), decision: { products: products.map(o => ({ produce: 0, quality: o.quality, price: o.price, ads: o.ads })) } };
+  });
+  // лимит кредита — по формуле движка (зависит от станков, в т.ч. проданных в этом квартале); числом — только если в игре он переопределён
+  const inp = { consts: clone(c), products: clone(ps), demand, rate: pl.rate, wage: pl.wage, rawMods: pl.rawMods.slice(), crisis: !!pl.bankCrisis,
+    me: { seat: me.seat || 0, cash: me.cash, debt: me.debt, machines: me.machines, machinesArriving: me.machinesArriving, workers: me.workers, trained: me.trained, brand: me.brand, inventory: clone(me.inventory), creditLimit: me.creditLimitOverride != null ? me.creditLimitOverride : null, decision: dec }, rivals };
+  return { inp, meta, title: pl.game + ' · кв. ' + pl.q, news: pl.news, currency: pl.currency, market: pl.market, research: pl.research, last: me.last, q: pl.q };
+}
+
+function encode(obj) { const s = JSON.stringify(obj); const b = typeof Buffer !== 'undefined' ? Buffer.from(s, 'utf8').toString('base64') : btoa(unescape(encodeURIComponent(s))); return b.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
+function decode(str) { const b = str.replace(/-/g, '+').replace(/_/g, '/'); const s = typeof Buffer !== 'undefined' ? Buffer.from(b, 'base64').toString('utf8') : decodeURIComponent(escape(atob(b))); return JSON.parse(s); }
+
+const Handoff = { fromGame, toInputs, encode, decode };
+if (typeof module !== 'undefined' && module.exports) module.exports = Handoff; else root.Handoff = Handoff;
+})(typeof window !== 'undefined' ? window : this);
+
 </script>
 <script>
 (function(){
@@ -2434,7 +2506,7 @@ function screenTeam() {
     <td data-label="Реклама, ${esc(cur())}"><span class="adwrap"><input type="number" min="0" step="10000" name="p${i}_ads" value="${o.ads}"><span class="adh" id="adh_${i}"></span></span></td>
     <td class="mono small" data-label="Сырьё / загрузка" id="calc_${i}">—</td></tr>`; }).join('');
   return topbar(`<button class="btn-ghost btn-sm" data-action="board">← К доске (скрыть)</button>`) + `
-  <div class="flex between"><h2 style="margin:0">${dot(t)}${esc(t.name)} ${statusPill(t)}</h2><div class="flex">${t.kind === 'human' ? jBtn(t.id) : ''}<span class="pill">${qLabel(q)}</span></div></div>
+  <div class="flex between"><h2 style="margin:0">${dot(t)}${esc(t.name)} ${statusPill(t)}</h2><div class="flex">${t.kind === 'human' ? jBtn(t.id) + sbBtn(t.id) : ''}<span class="pill">${qLabel(q)}</span></div></div>
   ${storageWarn()}<div class="card" style="margin-top:12px">${teamKpis(st, t)}</div>
   ${App.view.hideAdvice ? '<div style="margin-top:8px"><button class="btn-ghost btn-sm" data-action="toggleAdvice">Показать советника</button></div>' : `<div class="card accent" style="margin-top:12px"><div class="flex between"><h3 style="margin:0">Советник</h3><button class="btn-ghost btn-sm" data-action="toggleAdvice">Скрыть</button></div><ul class="advice small" style="margin-top:8px">${adviceFor(st, t).map(a => '<li>' + esc(a) + '</li>').join('')}</ul></div>`}
   ${t.kind === 'human' ? tasksBlock(st, t, false) : ''}
@@ -2546,6 +2618,8 @@ const STATE_PILL = { healthy: 'ok', pressure: 'warn', trouble: 'bad', edge: 'bad
 const tidy = (html) => html.replace(/тыс\.((?:<\/(?:b|span)>)*)\.(?!\.)/g, 'тыс.$1');
 const pct = (x, d) => (x > 0 ? '+' : x < 0 ? '−' : '') + Math.abs(x * 100).toFixed(d || 0).replace('.', ',') + ' %';
 const jBtn = (id, label) => `<button class="btn-sm" data-action="journal" data-id="${id}">📒 ${label || 'Журнал разведки'}</button>`;
+const SANDBOX_URL = 'pesochnica/'; // в офлайн-версии сборка подставляет 'pesochnica/'
+const sbBtn = (id) => `<button class="btn-sm" data-action="sandbox" data-id="${id}" title="Открыть расклад этого квартала в песочнице: крутить цену, рекламу и выпуск">🧪 Песочница</button>`;
 function renderLayer() {
   let el = document.getElementById('layer'); const L = App.layer;
   if (!L) { if (el) el.remove(); return; }
@@ -2913,6 +2987,7 @@ const actions = {
   guide() { App.layer = { kind: 'guide' }; renderLayer(); },
   journal(ds) { const t = App.state.teams.find(x => x.id === +ds.id); if (!t || t.kind !== 'human') return; App.layer = { kind: 'journal', teamId: t.id, tab: 'market', prod: 0 }; renderLayer(); },
   jTab(ds) { App.layer.tab = ds.tab; renderLayer(); },
+  sandbox(ds) { const t = App.state.teams.find(x => x.id === +ds.id); if (!t || t.kind !== 'human') return; App.save(); location.href = SANDBOX_URL + '#g=' + Handoff.encode(Handoff.fromGame(E, App.state, t.id)); },
   jProd(ds) { App.layer.prod = +ds.i; renderLayer(); },
   toggleAdvice() { App.view.hideAdvice = !App.view.hideAdvice; App.save(); render(); },
   closeModal() { App.layer = null; renderLayer(); },
